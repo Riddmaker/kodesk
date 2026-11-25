@@ -1,0 +1,25 @@
+# Owner's local working template + AI context (HABIT 5) — never committed.
+/CLAUDE.md
+/docs/
+/.claude/skills/
+/.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Nix
+result
+result-*
+.direnv/
+
+# Never: real device dumps / snapshots taken during manual tests
+/snapshots/
+.env
