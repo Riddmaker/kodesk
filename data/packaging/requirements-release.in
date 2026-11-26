@@ -1,0 +1,4 @@
+# Build tools for the sdist and wheel of a release (python -m build --no-isolation).
+# Edit here, then run tools/lock-requirements.sh to refresh the hashed lock file.
+build
+hatchling
