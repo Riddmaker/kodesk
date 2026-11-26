@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 from kodesk.core.devices import DeviceModel
 from kodesk.core.luadump import LuaTable, LuaValue
+from kodesk.core.statusbar import Footer, footer_value, header_items
+from kodesk.core.statusbar import footer as status_footer
 
 # frontend/ui/data/creoptions.lua + defaults.lua: defaults used when a key is absent.
 DEFAULT_FONT_SIZE = 22  # DCREREADER_CONFIG_DEFAULT_FONT_SIZE
@@ -34,19 +36,6 @@ DEFAULT_FONT_FACE = "Noto Serif"  # cre_font fallback shipped in koreader/fonts/
 DEFAULT_NIGHTMODE_IMAGES = 1
 HEADER_MARGIN = 4  # crengine lvdocview.cpp #define HEADER_MARGIN
 FONT_SIZES = (12, 16, 20, 22, 24, 26, 28, 30, 34, 38, 44)  # DCREREADER_CONFIG_FONT_SIZES
-
-# crengine header items (readercoptlistener.lua, cre_header_* keys; 1 = shown).
-HEADER_ITEMS = (
-    "title",
-    "author",
-    "clock",
-    "page_number",
-    "page_count",
-    "reading_percent",
-    "battery",
-    "battery_percent",
-    "chapter_marks",
-)
 
 
 def scale_by_size(px: float, screen_w: int, screen_h: int) -> int:
@@ -97,6 +86,7 @@ class BookLayout:
     header_font_px: int
     header_items: tuple[str, ...]
     footer: Box | None  # KOReader status bar (mini bar)
+    footer_bar: Footer | None  # what it shows
     text: Box
     night_mode: bool
     night_pictures_original: bool  # copt_nightmode_images == 1, see DEFAULT_NIGHTMODE_IMAGES
@@ -110,23 +100,24 @@ def _header(settings: LuaTable, width: int) -> tuple[Box | None, int, tuple[str,
     # lvdocview.cpp getPageHeaderHeight(): font height + HEADER_MARGIN. The font height of
     # Noto Sans is ~1.362 em; battery icon height is not modelled (estimate).
     box = Box(0, 0, width, round(font_px * 1.362) + HEADER_MARGIN)
-    items = tuple(item for item in HEADER_ITEMS if _number(settings, f"cre_header_{item}", 1) == 1)
-    return box, font_px, items
+    return box, font_px, header_items(settings)
+
+
+def _footer_number(settings: LuaTable, key: str, default: float) -> float:
+    value = footer_value(settings, key)
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else default
 
 
 def _footer(settings: LuaTable, width: int, height: int) -> tuple[Box | None, bool]:
     """KOReader's own status bar (bottom) and whether it reclaims its height from the text."""
-    footer_settings = settings.get("footer")
-    footer_settings = footer_settings if isinstance(footer_settings, dict) else {}
-    reclaim = footer_settings.get("reclaim_height") is True
-    footer_mode = int(_number(settings, "reader_footer_mode", 1))
-    if footer_mode == 0 or footer_settings.get("disabled") is True:
+    reclaim = footer_value(settings, "reclaim_height") is True
+    if status_footer(settings) is None:
         return None, reclaim
     # readerfooter.lua: height = scaleBySize(container_height) + scaleBySize(bottom_padding)
     footer_h = scale_by_size(
-        _number(footer_settings, "container_height", DEFAULT_FOOTER_HEIGHT), width, height
+        _footer_number(settings, "container_height", DEFAULT_FOOTER_HEIGHT), width, height
     ) + scale_by_size(
-        _number(footer_settings, "container_bottom_padding", DEFAULT_FOOTER_PADDING), width, height
+        _footer_number(settings, "container_bottom_padding", DEFAULT_FOOTER_PADDING), width, height
     )
     return Box(0, height - footer_h, width, footer_h), reclaim
 
@@ -166,6 +157,7 @@ def book_layout(device: DeviceModel, settings: LuaTable) -> BookLayout:
         header_font_px=header_font_px,
         header_items=items,
         footer=footer,
+        footer_bar=status_footer(settings),
         text=text,
         night_mode=settings.get("night_mode") is True,
         night_pictures_original=int(

@@ -26,7 +26,8 @@ from PySide6.QtGui import (
     QTextOption,
 )
 
-from kodesk.core.layout import BookLayout
+from kodesk.core.layout import BookLayout, scale_by_size
+from kodesk.core.statusbar import BATTERY_SIGN, Footer, Sample, footer_text
 
 TEXT_INDENT_EM = 1.2  # koreader/data/epub.css: p { text-indent: 1.2em; }
 NOTO_SANS_HEIGHT_EM = 1.362
@@ -182,6 +183,18 @@ class BookRenderer:
             text_line.draw(painter, origin)
         if lay.header is not None:
             self._paint_header(painter, ink, page, battery, clock)
+        if lay.footer is not None and lay.footer_bar is not None:
+            sample = Sample(
+                page=page + 1,
+                pages=len(self.pages),
+                chapter_pages_left=len(self.pages) - page - 1,
+                title=self.title,
+                author=self.author,
+                chapter=self.chapter,
+                clock=clock,
+                battery=battery,
+            )
+            self._paint_footer(painter, ink, lay.footer_bar, sample)
         painter.end()
         return image
 
@@ -215,8 +228,10 @@ class BookRenderer:
             right_parts.append(f"{page + 1}{total}")
         if "reading_percent" in items:
             right_parts.append(f"{100 * (page + 1) // len(self.pages)}%")
-        if "battery_percent" in items or "battery" in items:
-            right_parts.append(f"[{battery}%]")
+        if "battery" in items:  # crengine draws a battery icon; a plain sign stands in for it
+            right_parts.append(BATTERY_SIGN)
+        if "battery_percent" in items:
+            right_parts.append(f"{battery}%")
         box = QRect(lay.header.x + 4, lay.header.y + 4, lay.header.w - 8, lay.header.h - 4)
         painter.drawText(box, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), left)
         painter.drawText(
@@ -228,9 +243,63 @@ class BookRenderer:
             line_y = lay.header.y + lay.header.h - 2
             painter.drawLine(lay.header.x, line_y, lay.header.x + lay.header.w, line_y)
 
+    def _paint_footer(self, painter: QPainter, ink: QColor, status: Footer, sample: Sample) -> None:
+        """KOReader's status bar (readerfooter.lua updateFooterContainer), simplified: the
+        progress bar alongside, above or below the items; chapter marks are not drawn."""
+        lay = self.layout
+        assert lay.footer is not None
+
+        def scale(px: float) -> int:
+            return scale_by_size(px, lay.screen_w, lay.screen_h)
+
+        # Font:getFace scales the size; the bottom padding sits below the bar's row.
+        font = _font("Noto Sans", scale(status.font_size), QFont.StyleHint.SansSerif)
+        font.setBold(status.bold)
+        metrics = QFontMetricsF(font)
+        margin = scale(status.progress_margin_width)
+        row = QRectF(lay.footer.x + margin, lay.footer.y, lay.footer.w - 2 * margin, 0)
+        row.setHeight(lay.footer.h - scale(1))
+        text = footer_text(status, sample)
+        thickness = scale(3 if status.thin_bar else 7)  # progress_style_thin/thick_height
+        if status.progress_bar and status.bar_position == "alongside":
+            max_text = row.width() * (100 - status.min_bar_pct) / 100
+            text_w = min(metrics.horizontalAdvance(text), max_text) if text else 0.0
+            bar_w = row.width() - text_w - (margin if text else 0)
+            _paint_progress(
+                painter,
+                ink,
+                QRectF(row.x(), row.center().y() - thickness / 2, bar_w, thickness),
+                sample.page / sample.pages,
+            )
+            row = QRectF(row.right() - text_w, row.y(), text_w, row.height())
+        elif status.progress_bar:
+            above = status.bar_position == "above"
+            y = row.y() if above else row.bottom() - thickness
+            _paint_progress(
+                painter, ink, QRectF(row.x(), y, row.width(), thickness), sample.page / sample.pages
+            )
+            row = row.adjusted(0, thickness if above else 0, 0, 0 if above else -thickness)
+        if text:
+            align = {
+                "left": Qt.AlignmentFlag.AlignLeft,
+                "right": Qt.AlignmentFlag.AlignRight,
+            }.get(status.align, Qt.AlignmentFlag.AlignHCenter)
+            painter.setFont(font)
+            painter.setPen(ink)
+            elided = metrics.elidedText(text, Qt.TextElideMode.ElideRight, row.width())
+            painter.drawText(row, int(align | Qt.AlignmentFlag.AlignVCenter), elided)
+
     @property
     def page_count(self) -> int:
         return len(self.pages)
+
+
+def _paint_progress(painter: QPainter, ink: QColor, rect: QRectF, fraction: float) -> None:
+    """KOReader's ProgressWidget: an outline, filled up to the reading position."""
+    painter.setPen(QPen(ink, 1))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRect(rect)
+    painter.fillRect(QRectF(rect.x(), rect.y(), rect.width() * fraction, rect.height()), ink)
 
 
 def _canvas(size: tuple[int, int], night: bool) -> tuple[QImage, QPainter, QColor]:

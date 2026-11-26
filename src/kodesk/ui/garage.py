@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSplitter,
     QStackedWidget,
@@ -38,11 +40,30 @@ from kodesk.core.layout import (
     DEFAULT_B_MARGIN,
     DEFAULT_H_MARGINS,
     DEFAULT_NIGHTMODE_IMAGES,
+    DEFAULT_STATUS_LINE,
     DEFAULT_T_MARGIN,
     book_layout,
     scale_by_size,
 )
 from kodesk.core.luadump import KeyPath, LuaValue, SettingsDocument, changed_paths
+from kodesk.core.statusbar import (
+    ALIGNMENTS,
+    BAR_POSITIONS,
+    DEFAULT_FOOTER_MODE,
+    FONT_SIZE_RANGE,
+    FOOTER_DEFAULTS,
+    FOOTER_ITEMS,
+    FOOTER_KEY,
+    FOOTER_MODE_KEY,
+    HEADER_ITEMS,
+    ITEM_PREFIXES,
+    SEPARATORS,
+    footer_int,
+    footer_table,
+    footer_value,
+    footer_with,
+    header_key,
+)
 from kodesk.ui.device_view import DeviceView
 from kodesk.ui.screen import BookRenderer, render_library, render_menu, render_sleep
 
@@ -298,11 +319,23 @@ class TuningGarage(QWidget):
 
     def _build_right(self) -> QWidget:
         """Settings panel of the current view, the selected button, and the pending diff."""
-        self.panels.addWidget(self._book_panel())
+        book = QWidget(self)
+        book_layout_ = QVBoxLayout(book)
+        book_layout_.setContentsMargins(0, 0, 0, 0)
+        book_layout_.addWidget(self._book_panel())
+        book_layout_.addWidget(self._header_panel())
+        book_layout_.addWidget(self._footer_panel())
+        book_layout_.addStretch(1)
+        scroll = QScrollArea(self)
+        scroll.setObjectName("book-settings")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(book)
+        self.panels.addWidget(scroll)
         self.panels.addWidget(
             self._info_panel(
                 "KOReader's main menu over the page. Simplified drawing: tab and item sizes "
-                "are measured in a later step (B-13)."
+                "are measured in a later step."
             )
         )
         self.panels.addWidget(self._library_panel())
@@ -338,6 +371,26 @@ class TuningGarage(QWidget):
         leaves the key unset: no stray line in the diff (only visibly changed keys)."""
         unset = self.original.get(path) is None and value == default
         self._set(path, None if unset else value)
+
+    def _set_footer(self, key: str, value: LuaValue) -> None:
+        """One status-bar setting (see kodesk.core.statusbar: KOReader reads the ``footer``
+        table whole). Inside the reader's own table only that key changes; a reader without a
+        table gets KOReader's default table with the change, as KOReader would save it."""
+        if footer_table(self.original.data) is not None:
+            default = FOOTER_DEFAULTS.get(key, False)
+            self._set_or_default((FOOTER_KEY, key), value, False if default is True else default)
+        else:
+            self._set((FOOTER_KEY,), footer_with(self.edited.data, key, value))
+
+    def _set_footer_shown(self, on: bool) -> None:
+        """Off is mode 0; on brings back the reader's own mode (or KOReader's default)."""
+        original = self.original.get((FOOTER_MODE_KEY,))
+        if not on:
+            self._set((FOOTER_MODE_KEY,), 0)
+        else:
+            self._set((FOOTER_MODE_KEY,), None if original != 0 else DEFAULT_FOOTER_MODE)
+            if footer_value(self.edited.data, "disabled") is True:
+                self._set_footer("disabled", False)
 
     def _set_invert(self, on: bool) -> None:
         self._set_or_default(INVERT_KEY, on, False)
@@ -467,22 +520,142 @@ class TuningGarage(QWidget):
             )
         )
         form.addRow("", pictures)  # field column: indented under night mode
-        header = QCheckBox("Alternative status bar at the top", self)
-        header.setObjectName("alt-status-bar")
-        header.setChecked(layout.header is not None)
-        header.toggled.connect(lambda on: self._set(("copt_status_line",), 0 if on else 1))
-        form.addRow(header)
-        self._slider(
+        return panel
+
+    def _check(self, name: str, label: str, on: bool, then: Callable[[bool], None]) -> QCheckBox:
+        box = QCheckBox(label, self)
+        box.setObjectName(name)
+        box.setChecked(on)
+        box.toggled.connect(then)
+        return box
+
+    def _combo(
+        self,
+        name: str,
+        choices: tuple[tuple[str, str], ...],
+        current: str,
+        then: Callable[[str], None],
+    ) -> QComboBox:
+        combo = QComboBox(self)
+        combo.setObjectName(name)
+        for value, label in choices:
+            combo.addItem(label, value)
+        combo.setCurrentIndex(max(0, combo.findData(current)))
+        combo.currentIndexChanged.connect(lambda _index: then(str(combo.currentData())))
+        return combo
+
+    def _header_panel(self) -> QWidget:
+        """crengine's alternative status bar at the top (readercoptlistener.lua)."""
+        panel = QGroupBox("Status bar at the top", self)
+        form = QFormLayout(panel)
+        layout = book_layout(self.context.device, self.edited.data)
+        shown = self._check(
+            "alt-status-bar",
+            "Show the alternative status bar",
+            layout.header is not None,
+            lambda on: self._set_or_default(
+                ("copt_status_line",), 0 if on else 1, DEFAULT_STATUS_LINE
+            ),
+        )
+        form.addRow(shown)
+        items = QWidget(self)
+        items_form = QFormLayout(items)
+        items_form.setContentsMargins(0, 0, 0, 0)
+        for item, label, default in HEADER_ITEMS:
+            path = (header_key(item),)
+            items_form.addRow(
+                self._check(
+                    f"header-{item}",
+                    label,
+                    self._on(path, default),
+                    partial(self._set_header_item, path, default),
+                )
+            )
+        items.setEnabled(layout.header is not None)
+        shown.toggled.connect(items.setEnabled)
+        form.addRow(items)
+        size = self._slider(
             form,
             SliderSpec(
                 "header-font-size",
-                "Top bar font size",
+                "Font size",
                 ("cre_header_status_font_size",),
                 8,
                 40,
                 layout.header_font_px,
             ),
         )
+        size.setEnabled(layout.header is not None)
+        shown.toggled.connect(size.setEnabled)
+        return panel
+
+    def _set_header_item(self, path: KeyPath, default: int, on: bool) -> None:
+        self._set_or_default(path, 1 if on else 0, default)
+
+    def _on(self, path: KeyPath, default: int) -> bool:
+        value = self._value(path)
+        return (value if isinstance(value, int) and not isinstance(value, bool) else default) == 1
+
+    def _footer_panel(self) -> QWidget:
+        """KOReader's own status bar at the bottom (readerfooter.lua)."""
+        panel = QGroupBox("Status bar at the bottom", self)
+        form = QFormLayout(panel)
+        settings = self.edited.data
+        mode = settings.get(FOOTER_MODE_KEY)
+        shown = self._check(
+            "footer-shown",
+            "Show the status bar",
+            mode != 0 and footer_value(settings, "disabled") is not True,
+            self._set_footer_shown,
+        )
+        form.addRow(shown)
+        details = QWidget(self)
+        details_form = QFormLayout(details)
+        details_form.setContentsMargins(0, 0, 0, 0)
+
+        def check(key: str, label: str, invert: bool = False) -> QCheckBox:
+            on = footer_value(settings, key) is True
+            return self._check(
+                f"footer-{key}",
+                label,
+                on != invert,
+                lambda value: self._set_footer(key, value != invert),
+            )
+
+        details_form.addRow(check("all_at_once", "Show all selected items at once"))
+        for key, label in FOOTER_ITEMS:
+            details_form.addRow("", check(key, label))  # field column: indented items
+        details_form.addRow(check("disable_progress_bar", "Progress bar", invert=True))
+
+        def combo(key: str, choices: tuple[tuple[str, str], ...]) -> QComboBox:
+            current = footer_value(settings, key)
+            return self._combo(
+                f"footer-{key}",
+                choices,
+                current if isinstance(current, str) else str(FOOTER_DEFAULTS[key]),
+                lambda value: self._set_footer(key, value),
+            )
+
+        details_form.addRow("Progress bar position", combo("progress_bar_position", BAR_POSITIONS))
+        details_form.addRow("Item prefix", combo("item_prefix", ITEM_PREFIXES))
+        details_form.addRow("Separator", combo("items_separator", SEPARATORS))
+        details_form.addRow("Alignment", combo("align", ALIGNMENTS))
+        slider = QSlider(Qt.Orientation.Horizontal, self)
+        slider.setObjectName("footer-text_font_size")
+        slider.setRange(*FONT_SIZE_RANGE)
+        slider.setValue(footer_int(settings, "text_font_size"))
+        value_label = QLabel(str(slider.value()), self)
+        value_label.setMinimumWidth(32)
+        slider.valueChanged.connect(lambda v: value_label.setText(str(v)))
+        slider.valueChanged.connect(lambda v: self._set_footer("text_font_size", v))
+        row = QHBoxLayout()
+        row.addWidget(slider, 1)
+        row.addWidget(value_label)
+        details_form.addRow("Font size", row)
+        details_form.addRow(check("text_font_bold", "Bold"))
+        details.setEnabled(shown.isChecked())
+        shown.toggled.connect(details.setEnabled)
+        form.addRow(details)
         return panel
 
     def _info_panel(self, text: str) -> QWidget:

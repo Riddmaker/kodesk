@@ -14,7 +14,15 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QProgressDialog, QSlider, QToolButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDialog,
+    QProgressDialog,
+    QScrollArea,
+    QSlider,
+    QToolButton,
+)
 
 from kodesk.core import catalogue as cat
 from kodesk.core import healthcheck, update
@@ -23,7 +31,7 @@ from kodesk.core.records import Records
 from kodesk.core.snapshot import Progress
 from kodesk.ui.app import MainWindow, reader_context
 from kodesk.ui.changes import prepare_entry
-from kodesk.ui.garage import View
+from kodesk.ui.garage import TuningGarage, View
 from kodesk.ui.koupdate import UpdateDialog
 from kodesk.ui.snapshots import with_snapshot_progress
 
@@ -75,6 +83,8 @@ def main(argv: list[str]) -> int:
             button.click()
             if side != "Front":
                 shot("garage-bottom-edge")
+        status_bar_shot(garage)
+        shot("garage-status-bars")
         garage.set_view(View.SLEEP)
         shot("garage-sleep")
         snapshot_shots(app, window, out, suffix)
@@ -102,6 +112,18 @@ def grab_modal(app: QApplication, path: Path, tries: int = 50) -> None:
             raise SystemExit(f"no dialog appeared for {path.name}")
 
     QTimer.singleShot(100, lambda: attempt(tries))
+
+
+def status_bar_shot(garage: TuningGarage) -> None:
+    """The bottom status bar with a few items switched on, its group scrolled into view."""
+    for key in ("all_at_once", "page_progress", "percentage", "time", "battery"):
+        box = garage.findChild(QCheckBox, f"footer-{key}")
+        assert box is not None
+        box.setChecked(True)
+    scroll = garage.findChild(QScrollArea, "book-settings")
+    bold = garage.findChild(QCheckBox, "footer-text_font_bold")
+    assert scroll is not None and bold is not None
+    scroll.ensureWidgetVisible(bold)
 
 
 def snapshot_shots(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:

@@ -12,6 +12,7 @@ import pytest
 from PySide6.QtCore import QStandardPaths, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QListWidget,
     QMessageBox,
     QProgressDialog,
@@ -161,6 +162,54 @@ def test_slider_changes_exactly_one_key(garage: TuningGarage) -> None:
     assert changes is not None and changes.item(0).text() == "copt_font_size: 22 → 26"
     slider.setValue(22)
     assert not garage.changed()
+
+
+def test_footer_item_inside_the_readers_table_changes_one_key(garage: TuningGarage) -> None:
+    title = garage.findChild(QCheckBox, "footer-book_title")
+    assert title is not None and not title.isChecked()
+    before = garage.screen_image()
+    title.setChecked(True)
+    assert garage.changed() == [("footer", "book_title")]
+    assert garage.screen_image() != before  # the title shows in the drawn status bar
+    title.setChecked(False)
+    assert not garage.changed()  # a key the reader never had stays unset
+
+
+def test_footer_without_a_table_gets_koreaders_default_table(qtbot: QtBot, tmp_path: Path) -> None:
+    volume = make_pocketbook(tmp_path / "PB", settings={"copt_font_size": 22})
+    window = MainWindow(reader_context(find_install(volume)))
+    qtbot.addWidget(window)
+    garage = window.garage
+    prefix = garage.findChild(QComboBox, "footer-item_prefix")
+    assert prefix is not None and prefix.currentData() == "icons"
+    prefix.setCurrentIndex(prefix.findData("letters"))
+    assert garage.changed() == [("footer",)]
+    table = garage.edited.get(("footer",))
+    assert isinstance(table, dict) and table["item_prefix"] == "letters"
+    assert table["page_progress"] is True  # KOReader's defaults, not nil
+    prefix.setCurrentIndex(prefix.findData("icons"))
+    assert not garage.changed()
+
+
+def test_hiding_and_showing_the_footer(garage: TuningGarage) -> None:
+    shown = garage.findChild(QCheckBox, "footer-shown")
+    bold = garage.findChild(QCheckBox, "footer-text_font_bold")
+    assert shown is not None and bold is not None and shown.isChecked()
+    shown.setChecked(False)
+    assert garage.edited.get(("reader_footer_mode",)) == 0 and not bold.isEnabled()
+    shown.setChecked(True)
+    assert not garage.changed() and bold.isEnabled()
+
+
+def test_top_bar_items_follow_the_alternative_status_bar(garage: TuningGarage) -> None:
+    shown = garage.findChild(QCheckBox, "alt-status-bar")
+    percent = garage.findChild(QCheckBox, "header-reading_percent")
+    assert shown is not None and percent is not None
+    assert shown.isChecked() and not percent.isChecked()  # crengine's default is 0
+    percent.setChecked(True)
+    assert garage.changed() == [("cre_header_reading_percent",)]
+    shown.setChecked(False)
+    assert not percent.isEnabled()
 
 
 def test_screen_is_rendered_at_device_pixels(garage: TuningGarage) -> None:
