@@ -221,6 +221,8 @@ class SnapshotStore:
         ``outside`` names files beside the folder to keep too (only names in :data:`OUTSIDE`).
         ``progress`` is called before the first file and after each one.
         """
+        if not (koreader_dir / "reader.lua").is_file():  # unplugged: never an empty snapshot
+            raise SnapshotError(f"the reader is not connected (no KOReader at {koreader_dir})")
         paths = walk(koreader_dir)
         extra = [
             f"../{name}"

@@ -9,11 +9,12 @@ import os
 import stat
 import urllib.request
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from kodesk.core.luadump import dump_file
 from kodesk.core.net import CancelledError, NetError, Response
@@ -372,3 +373,14 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(f"a test tried to reach the network: {url}")
 
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", refuse)
+
+
+@pytest.fixture(autouse=True)
+def close_windows() -> Iterator[None]:
+    """After each test, close every window it left open: a leftover modal dialog would block
+    the next test's dialogs and the reader watcher (which waits while a dialog is open)."""
+    yield
+    app = QApplication.instance()
+    if isinstance(app, QApplication):
+        for widget in app.topLevelWidgets():
+            widget.close()

@@ -32,6 +32,7 @@ from kodesk.ui.changes import ChangeRunner
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.installed import InstalledPage
 from kodesk.ui.koupdate import KOReaderUpdater
+from kodesk.ui.readers import Lister, ReaderWatcher, mounted_readers
 from kodesk.ui.screen import load_device_fonts
 from kodesk.ui.snapshots import SnapshotsDialog, with_snapshot_progress
 from kodesk.ui.store import StorePage
@@ -112,18 +113,6 @@ def store_page(offline: bool, parent: QWidget) -> StorePage:
     return StorePage(lambda: catalogue.load(cache_dir, get), fetch, parent)
 
 
-def detect_reader() -> KOReaderInstall | None:
-    """First mounted volume that holds a KOReader installation."""
-    for volume in QStorageInfo.mountedVolumes():
-        if not volume.isValid() or not volume.isReady():
-            continue
-        try:
-            return find_install(Path(volume.rootPath()))
-        except (InstallError, OSError):
-            continue
-    return None
-
-
 class MainWindow(QMainWindow):
     """Main window: menu bar, the Tuning-Garage, Installed and Store tabs, the reader below."""
 
@@ -184,6 +173,8 @@ class MainWindow(QMainWindow):
         reader_menu = self.menuBar().addMenu("&Reader")
         reader_menu.addAction(self.snapshots_action)
         reader_menu.addAction(self.koreader_action)
+        self.reader_menu = reader_menu
+        self.watcher: ReaderWatcher | None = None
         self.snapshots_button = QPushButton("Snapshots…", self)
         self.snapshots_button.setObjectName("snapshots")
         self.snapshots_button.setToolTip("Snapshots of your reader, restore in one click")
@@ -213,6 +204,25 @@ class MainWindow(QMainWindow):
                 lambda before, after: self._write_settings(install, before, after)
             )
             QTimer.singleShot(0, self.check_health)
+
+    def show_reader(self, install: KOReaderInstall | None) -> str | None:
+        """Show ``install`` (None: the demo reader); an error message if it cannot be shown."""
+        if install is None:
+            self.set_context(demo_context(), None)
+            return None
+        try:
+            self.set_context(reader_context(install), install)
+        except (InstallError, OSError) as error:
+            return str(error)
+        return None
+
+    def watch_readers(self, lister: Lister = mounted_readers) -> ReaderWatcher:
+        """Follow readers being plugged in and out (Reader → Connected readers)."""
+        self.reader_menu.addSeparator()
+        menu = self.reader_menu.addMenu("&Connected readers")
+        self.watcher = ReaderWatcher(self, menu, lister)
+        self.watcher.start()
+        return self.watcher
 
     def reread(self) -> None:
         """Read what is installed again (after a change) and where it came from."""
@@ -320,10 +330,11 @@ class MainWindow(QMainWindow):
         if not folder:
             return
         try:
-            install = find_install(Path(folder))
-            self.set_context(reader_context(install), install)
-        except (InstallError, OSError) as error:
-            QMessageBox.warning(self, APP_NAME, str(error))
+            error = self.show_reader(find_install(Path(folder)))
+        except (InstallError, OSError) as failure:
+            error = str(failure)
+        if error:
+            QMessageBox.warning(self, APP_NAME, error)
 
     def show_snapshots(self) -> SnapshotsDialog | None:
         """Open the Snapshots window for the connected reader."""
@@ -360,13 +371,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     context, install = demo_context(), None
     if not args.demo:
         try:
-            found = find_install(args.path) if args.path else detect_reader()
+            found = find_install(args.path) if args.path else next(iter(mounted_readers()), None)
             if found is not None:
                 context, install = reader_context(found), found
         except (InstallError, OSError) as error:
             print(f"{APP_NAME}: {error}; showing the demo reader", file=sys.stderr)
     window = MainWindow(context, install, offline=args.offline)
     window.show()
+    if not (args.path or args.demo or args.smoke_test):
+        window.watch_readers()  # only when kodesk looks for readers itself
     if args.smoke_test:
         QTimer.singleShot(0, app.quit)
     return app.exec()
