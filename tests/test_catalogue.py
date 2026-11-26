@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from kodesk.core import catalogue as cat
+from kodesk.core import net
 from kodesk.core.catalogue import CatalogueError, Kind, Response
 from tests.conftest import THIRD_PARTY_PLUGIN, USER_PATCH, fake_catalogue
 
@@ -27,7 +28,7 @@ class FakeServer:
         if self.down:
             raise OSError("network unreachable")
         if url not in self.files:
-            raise CatalogueError(f"{url}: HTTP 404")
+            raise CatalogueError(f"{url}: HTTP 404", 404)
         body = self.files[url]
         assert len(body) <= limit
         etag = f'"{len(body)}"'
@@ -153,7 +154,7 @@ def test_patch_text_is_the_file_itself() -> None:
 )
 def test_redirects_follow_the_same_rules(target: str) -> None:
     # pylint: disable-next=protected-access  # the handler https_get installs
-    handler = cat._CheckedRedirects()
+    handler = net._CheckedRedirects()
     request = urllib.request.Request(cat.INDEX_URL)
     with pytest.raises(CatalogueError, match="refusing"):
         handler.redirect_request(request, None, 302, "Found", {}, target)

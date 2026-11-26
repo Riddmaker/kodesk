@@ -13,39 +13,35 @@ from __future__ import annotations
 
 import json
 import re
-import ssl
-import urllib.error
-import urllib.request
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
-from kodesk import __version__
+from kodesk.core.net import Get, NetError, Response, check_url, https_get
+
+__all__ = ["CatalogueError", "Get", "Response", "check_url", "https_get"]  # re-exported
 
 INDEX_BASE = "https://omer-faruq.github.io/koreader-plugin-index/"
 INDEX_URL = INDEX_BASE + "index.json"
 PATCHES_URL = INDEX_BASE + "patches.json"
 SOURCE_NAME = "omer-faruq/koreader-plugin-index"
 SOURCE_URL = "https://github.com/omer-faruq/koreader-plugin-index"
-ALLOWED_HOSTS = frozenset({"omer-faruq.github.io", "raw.githubusercontent.com"})
 MAX_INDEX_BYTES = 16 * 2**20  # index.json is 2.5 MB today
 MAX_TEXT_BYTES = 2 * 2**20  # one README or patch file
-TIMEOUT = 20
 MAX_FIELD = 2000  # characters kept of any text field
-USER_AGENT = f"kodesk/{__version__} (+https://github.com/Riddmaker/kodesk)"
 TEMP_SUFFIX = ".kodesk-tmp"
 
 _NAME = r"[A-Za-z0-9_.-]+"
 _REPO_URL = re.compile(rf"^https://github\.com/(?P<owner>{_NAME})/(?P<repo>{_NAME})$")
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 
 
-class CatalogueError(Exception):
-    """The catalogue (or a README) could not be loaded or is not what kodesk expects."""
+# The catalogue (or a README) could not be loaded or is not what kodesk expects.
+CatalogueError = NetError
 
 
 class Kind(StrEnum):
@@ -54,17 +50,7 @@ class Kind(StrEnum):
 
 
 @dataclass(frozen=True)
-class Response:
-    status: int  # 200 or 304
-    etag: str | None
-    body: bytes
-
-
-Get = Callable[[str, Mapping[str, str], int], Response]
-
-
-@dataclass(frozen=True)
-class Entry:
+class Entry:  # pylint: disable=too-many-instance-attributes  # one index record
     """One plugin repo or one patch file from the index."""
 
     kind: Kind
@@ -82,6 +68,8 @@ class Entry:
     pushed_at: str = ""
     archived: bool = False
     text_url: str | None = None  # README (plugins) or the patch file itself, raw
+    branch: str = ""  # plugins: the repo's default branch (validated), "" if unusable
+    file_sha: str = ""  # patches: git blob SHA-1 of the file when the index was built
 
     def matches(self, words: Iterable[str]) -> bool:
         haystack = " ".join((self.name, self.owner, self.repo, self.description, *self.keywords))
@@ -95,55 +83,6 @@ class Catalogue:
     categories: Mapping[str, str]  # id -> label
     generated_at: str  # when the index was built (shown with the credit)
     offline: bool = False  # True: network failed, this is the cached copy
-
-
-def check_url(url: str) -> str:
-    """Only HTTPS to the allowed hosts, no credentials or odd ports in the URL."""
-    parts = urlsplit(url)
-    if (
-        parts.scheme != "https"
-        or parts.hostname not in ALLOWED_HOSTS
-        or parts.username
-        or parts.password
-        or parts.port not in (None, 443)
-    ):
-        raise CatalogueError(f"refusing to load {url!r}: only HTTPS from {sorted(ALLOWED_HOSTS)}")
-    return url
-
-
-class _CheckedRedirects(urllib.request.HTTPRedirectHandler):
-    def redirect_request(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        self,
-        req: urllib.request.Request,
-        fp: Any,
-        code: int,
-        msg: str,
-        headers: Any,
-        newurl: str,
-    ) -> urllib.request.Request | None:
-        check_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def https_get(url: str, headers: Mapping[str, str], limit: int) -> Response:
-    """GET ``url`` over verified TLS; 304 is a valid answer; at most ``limit`` bytes."""
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=ssl.create_default_context()), _CheckedRedirects()
-    )
-    headers = {"User-Agent": USER_AGENT, **headers}
-    request = urllib.request.Request(check_url(url), headers=headers)  # noqa: S310  # https only
-    try:
-        with opener.open(request, timeout=TIMEOUT) as answer:
-            body = answer.read(limit + 1)
-            etag = answer.headers.get("ETag")
-            status = answer.status
-    except urllib.error.HTTPError as error:
-        if error.code == 304:
-            return Response(304, error.headers.get("ETag"), b"")
-        raise CatalogueError(f"{url}: HTTP {error.code}") from error
-    if len(body) > limit:
-        raise CatalogueError(f"{url}: larger than {limit // 2**20} MB")
-    return Response(status, etag, body)
 
 
 def fetch_cached(url: str, cache_dir: Path, get: Get | None) -> tuple[bytes, bool]:
@@ -210,6 +149,8 @@ def _plugin(raw: object) -> Entry | None:
     readme = None
     if _BRANCH.match(branch) and ".." not in branch:
         readme = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/README.md"
+    else:
+        branch = ""
     return Entry(
         kind=Kind.PLUGIN,
         id=f"{owner}/{repo}",
@@ -226,6 +167,7 @@ def _plugin(raw: object) -> Entry | None:
         pushed_at=_text(raw.get("pushed_at")),
         archived=raw.get("archived") is True,
         text_url=readme,
+        branch=branch,
     )
 
 
@@ -258,6 +200,7 @@ def _patch(raw: object) -> Entry | None:
         pushed_at=_text(raw.get("file_modified_at")) or _text(raw.get("repo_pushed_at")),
         archived=raw.get("archived") is True,
         text_url=text_url,
+        file_sha=sha if _GIT_SHA.match(sha := _text(raw.get("file_sha"))) else "",
     )
 
 
@@ -303,7 +246,7 @@ def fetch_text(entry: Entry, get: Get = https_get) -> str:
         try:
             answer = get(url, {}, MAX_TEXT_BYTES)
         except CatalogueError as error:
-            if "HTTP 404" in str(error) and url != urls[-1]:
+            if error.status == 404 and url != urls[-1]:
                 continue
             raise
         return answer.body.decode("utf-8", errors="replace")
