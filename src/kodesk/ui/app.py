@@ -27,6 +27,7 @@ from kodesk.core.luadump import SettingsDocument
 from kodesk.core.settings_write import write_settings
 from kodesk.core.snapshot import SnapshotStore, device_id
 from kodesk.core.volume import volume_serial
+from kodesk.ui.changes import ChangeRunner
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.installed import InstalledPage
 from kodesk.ui.screen import load_device_fonts
@@ -144,6 +145,21 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.installed, "&Installed")
         self.store = store_page(offline, self)
         self.tabs.addTab(self.store, "&Store")
+        self.changes = ChangeRunner(
+            self,
+            None if offline else catalogue.https_get,
+            self._catalogue,
+            snapshot_store,
+            self.reread,
+        )
+        self.store.install_requested.connect(self.changes.install_entry)
+        self.store.loaded.connect(self._show_sources)
+        self.installed.update_requested.connect(self.changes.update)
+        self.installed.remove_requested.connect(self.changes.remove)
+        self.installed.source_requested.connect(self.changes.set_source)
+        self.installed.check_requested.connect(
+            lambda: self.changes.check(self.installed.checkable(), self.installed.set_updates)
+        )
         self.tabs.currentChanged.connect(self._tab_changed)
         self.setWindowTitle(APP_NAME)
         self.resize(1280, 860)
@@ -179,17 +195,35 @@ class MainWindow(QMainWindow):
             old.deleteLater()
         self.tabs.insertTab(0, self.garage, "Tuning-&Garage")
         self.tabs.setCurrentIndex(0)
-        self.installed.set_install(install)
-        self.store.set_installed(
-            frozenset(install.plugins()) if install else frozenset(),
-            frozenset(p.name for p in self.installed.patches),
-        )
+        self.changes.install = install
+        self.reread()
         self.statusBar().showMessage(context.source_label)
         if install is not None:
             self.garage.set_writer(
                 lambda before, after: self._write_settings(install, before, after)
             )
             QTimer.singleShot(0, self.check_health)
+
+    def reread(self) -> None:
+        """Read what is installed again (after a change) and where it came from."""
+        install = self.install
+        self.installed.set_install(install)
+        self.store.set_installed(
+            frozenset(install.plugins()) if install else frozenset(),
+            frozenset(p.name for p in self.installed.patches),
+        )
+        self._show_sources()
+
+    def _show_sources(self) -> None:
+        records = self.changes.records() if self.install is not None else None
+        entries = self.store.catalogue.entries if self.store.catalogue else ()
+        self.installed.set_sources(records.all() if records else (), entries)
+
+    def _catalogue(self) -> catalogue.Catalogue | None:
+        """The Store's catalogue; starts loading it if it is not there yet."""
+        if self.store.catalogue is None:
+            self.store.ensure_loaded()
+        return self.store.catalogue
 
     def _tab_changed(self, index: int) -> None:
         if self.tabs.widget(index) is self.store:

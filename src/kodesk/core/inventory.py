@@ -85,6 +85,12 @@ def list_plugins(koreader_dir: Path, settings: SettingsDocument) -> tuple[Plugin
     return tuple(result)
 
 
+def patch_priority(name: str) -> str | None:
+    """The priority digit of a patch file name, None if KOReader would never run it."""
+    match = _PATCH_NAME.match(name)
+    return match["priority"] if match else None
+
+
 def list_patches(koreader_dir: Path) -> tuple[Patch, ...]:
     """Files in ``patches/``, sorted by name, with whether KOReader would run them."""
     patches_dir = koreader_dir / "patches"
@@ -95,8 +101,7 @@ def list_patches(koreader_dir: Path) -> tuple[Patch, ...]:
     for path in sorted(patches_dir.iterdir(), key=lambda p: p.name.lower()):
         if not path.is_file() or path.name == ".patches_disabled":
             continue
-        match = _PATCH_NAME.match(path.name)
-        priority = match["priority"] if match else None
+        priority = patch_priority(path.name)
         runs = not all_off and priority in RUN_PRIORITIES
         result.append(Patch(name=path.name, priority=priority, runs=runs))
     return tuple(result)

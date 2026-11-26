@@ -48,7 +48,8 @@ def plan_text(plan: RestorePlan) -> str:
     return "\n".join(lines)
 
 
-def _busy[T](action: Callable[[], T]) -> T:
+def busy[T](action: Callable[[], T]) -> T:
+    """Run ``action`` with the wait cursor (short writes on the UI thread)."""
     QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
     try:
         return action()
@@ -115,7 +116,7 @@ class SnapshotsDialog(QDialog):
     def take(self) -> None:
         """Take a snapshot now (reads the reader, writes only to this PC)."""
         try:
-            _busy(lambda: self.store.take(self.koreader_dir))
+            busy(lambda: self.store.take(self.koreader_dir))
         except (SnapshotError, OSError) as error:
             QMessageBox.warning(self, self.windowTitle(), f"No snapshot taken: {error}")
         self.refresh()
@@ -140,7 +141,7 @@ class SnapshotsDialog(QDialog):
             snapshot = self.selected()
             if snapshot is None:
                 return
-            plan = _busy(lambda: self.store.plan_restore(self.koreader_dir, snapshot))
+            plan = busy(lambda: self.store.plan_restore(self.koreader_dir, snapshot))
         except (SnapshotError, OSError) as error:
             QMessageBox.warning(self, self.windowTitle(), str(error))
             return
@@ -151,7 +152,7 @@ class SnapshotsDialog(QDialog):
             return
         if self.confirm(snapshot, plan):
             try:
-                _busy(lambda: self.store.restore(self.koreader_dir, snapshot))
+                busy(lambda: self.store.restore(self.koreader_dir, snapshot))
             except (SnapshotError, OSError) as error:
                 QMessageBox.critical(self, self.windowTitle(), f"Restore failed: {error}")
                 return

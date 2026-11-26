@@ -1,17 +1,37 @@
-"""The Installed tab: plugins and user patches on the connected reader (B-03). Read-only."""
+"""The Installed tab: plugins and user patches on the connected reader (B-03, B-08, B-09).
+
+The list is read-only; the buttons below it ask the main window to update, remove or set the
+source of the selected item, or to check for updates (only on click, never in the background).
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QCheckBox, QLabel, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from collections.abc import Iterable, Mapping
 
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from kodesk.core.catalogue import Entry, Kind
 from kodesk.core.install import InstallError, KOReaderInstall
 from kodesk.core.inventory import RUN_PRIORITIES, Origin, Patch, Plugin, list_patches, list_plugins
+from kodesk.core.records import Record
+from kodesk.core.sources import probable_sources
 
-COLUMNS = ("Name", "Origin", "State")
+COLUMNS = ("Name", "Origin", "State", "Source", "Update")
 UNKNOWN_ORIGIN = "Origin unknown"
 UNKNOWN_HINT = "The reader has no ota/package.index, the file list of the installed KOReader."
 NO_READER = "Connect a reader (File → Open reader…) to see what is installed on it."
+UNKNOWN_SOURCE = "Unknown"
+Key = tuple[Kind, str]
 
 
 def plugin_row(plugin: Plugin) -> tuple[str, str, str]:
@@ -36,6 +56,17 @@ def patch_row(patch: Patch) -> tuple[str, str, str]:
     return patch.name, "Added by you", state
 
 
+def source_text(record: Record | None, guesses: tuple[Entry, ...]) -> str:
+    """Where an item came from: kodesk's record, else a guess by name (said as such)."""
+    if record is not None:
+        return f"{record.source} {record.version}".strip()
+    if len(guesses) == 1:
+        return f"probably {guesses[0].id}"
+    if guesses:
+        return f"{len(guesses)} possible sources"
+    return UNKNOWN_SOURCE
+
+
 def _count(number: int, one: str, many: str) -> str:
     return f"{number} {one if number == 1 else many}"
 
@@ -55,14 +86,22 @@ def summary(plugins: tuple[Plugin, ...], patches: tuple[Patch, ...]) -> str:
     return f"{plugin_text}{detail}, {_count(len(patches), 'user patch', 'user patches')}."
 
 
-class InstalledPage(QWidget):
-    """Two groups, plugins and patches; built-in plugins only on request."""
+class InstalledPage(QWidget):  # pylint: disable=too-many-instance-attributes  # widgets
+    """Two groups, plugins and patches; built-in plugins only on request; actions below."""
+
+    update_requested = Signal(object)  # Key
+    remove_requested = Signal(object)  # Key
+    source_requested = Signal(object)  # Key
+    check_requested = Signal()
 
     def __init__(self, parent: QWidget | None) -> None:
         super().__init__(parent)
         self.install: KOReaderInstall | None = None
         self.plugins: tuple[Plugin, ...] = ()
         self.patches: tuple[Patch, ...] = ()
+        self.records: Mapping[Key, Record] = {}
+        self.entries: tuple[Entry, ...] = ()
+        self.updates: dict[Key, str] = {}
         self.summary = QLabel(self)
         self.summary.setObjectName("installed-summary")
         self.summary.setWordWrap(True)
@@ -74,11 +113,39 @@ class InstalledPage(QWidget):
         self.tree.setObjectName("installed-list")
         self.tree.setHeaderLabels(list(COLUMNS))
         self.tree.setRootIsDecorated(False)
+        self.tree.currentItemChanged.connect(lambda *_args: self._enable())
         layout = QVBoxLayout(self)
         layout.addWidget(self.summary)
         layout.addWidget(self.show_built_in)
         layout.addWidget(self.tree, 1)
+        layout.addLayout(self._buttons())
         self.set_install(None)
+
+    def _buttons(self) -> QHBoxLayout:
+        self.update_button = QPushButton("&Update…", self)
+        self.remove_button = QPushButton("Re&move…", self)
+        self.source_button = QPushButton("Set s&ource…", self)
+        self.check_button = QPushButton("&Check for updates", self)
+        row = QHBoxLayout()
+        for button, name, signal in (
+            (self.update_button, "installed-update", self.update_requested),
+            (self.remove_button, "installed-remove", self.remove_requested),
+            (self.source_button, "installed-source", self.source_requested),
+        ):
+            button.setObjectName(name)
+            button.clicked.connect(lambda _c=False, s=signal: self._emit(s))
+            row.addWidget(button)
+        self.check_button.setObjectName("installed-check")
+        self.check_button.setToolTip("Asks GitHub for the latest version of each item")
+        self.check_button.clicked.connect(self.check_requested.emit)
+        row.addStretch(1)
+        row.addWidget(self.check_button)
+        return row
+
+    def _emit(self, signal: Signal) -> None:
+        key = self.selected()
+        if key is not None:
+            signal.emit(key)  # type: ignore[attr-defined]
 
     def set_install(self, install: KOReaderInstall | None) -> None:
         """Read the inventory of ``install`` (read-only), or show the hint for the demo."""
@@ -91,17 +158,57 @@ class InstalledPage(QWidget):
                 problem = f" On/off could not be read: {error}"
                 self.plugins = ()
             self.patches = list_patches(install.root)
-        self.show_built_in.setVisible(install is not None)
-        self.tree.setVisible(install is not None)
+        self.updates = {}
+        for widget in (self.show_built_in, self.tree, self.check_button):
+            widget.setVisible(install is not None)
+        for button in (self.update_button, self.remove_button, self.source_button):
+            button.setVisible(install is not None)
         if install is None:
             self.summary.setText(NO_READER)
         else:
             self.summary.setText(summary(self.plugins, self.patches) + problem)
         self.refresh()
 
+    def set_sources(self, records: Iterable[Record], entries: Iterable[Entry]) -> None:
+        """kodesk's install records and the catalogue (for guesses by name)."""
+        self.records = {(r.kind, r.name): r for r in records}
+        self.entries = tuple(entries)
+        self.refresh()
+
+    def set_updates(self, updates: Mapping[Key, str]) -> None:
+        """Results of "Check for updates", per item."""
+        self.updates = dict(updates)
+        self.refresh()
+
+    def guesses(self, key: Key) -> tuple[Entry, ...]:
+        """Catalogue entries matching an item by name."""
+        return probable_sources(self.entries, *key)
+
+    def checkable(self) -> list[Key]:
+        """Items that are not built in (what "Check for updates" looks at)."""
+        plugins = [(Kind.PLUGIN, p.name) for p in self.plugins if p.origin is not Origin.BUILT_IN]
+        return plugins + [(Kind.PATCH, p.name) for p in self.patches]
+
+    def selected(self) -> Key | None:
+        """The selected plugin or patch, None for a group row or a built-in plugin."""
+        item = self.tree.currentItem()
+        key = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        return key if isinstance(key, tuple) else None
+
+    def _enable(self) -> None:
+        on = self.selected() is not None
+        for button in (self.update_button, self.remove_button, self.source_button):
+            button.setEnabled(on)
+
+    def _row(self, key: Key, cells: tuple[str, str, str]) -> list[str]:
+        source = source_text(self.records.get(key), self.guesses(key))
+        return [*cells, source, self.updates.get(key, "")]
+
     def refresh(self) -> None:
         """Rebuild the tree from the last read inventory and the built-in switch."""
+        selected = self.selected()
         self.tree.clear()
+        self._enable()
         if self.install is None:
             return
         shown = [
@@ -110,8 +217,14 @@ class InstalledPage(QWidget):
             if self.show_built_in.isChecked() or p.origin is not Origin.BUILT_IN
         ]
         groups = (
-            (f"Plugins ({len(shown)} shown)", [plugin_row(p) for p in shown]),
-            (f"User patches ({len(self.patches)})", [patch_row(p) for p in self.patches]),
+            (
+                f"Plugins ({len(shown)} shown)",
+                [((Kind.PLUGIN, p.name), plugin_row(p), p.origin) for p in shown],
+            ),
+            (
+                f"User patches ({len(self.patches)})",
+                [((Kind.PATCH, p.name), patch_row(p), None) for p in self.patches],
+            ),
         )
         for title, rows in groups:
             group = QTreeWidgetItem(self.tree, [title])
@@ -122,10 +235,16 @@ class InstalledPage(QWidget):
             group.setFont(0, font)
             if not rows:
                 QTreeWidgetItem(group, ["None"]).setFlags(Qt.ItemFlag.ItemIsEnabled)
-            for row in rows:
-                item = QTreeWidgetItem(group, list(row))
-                if row[1] == UNKNOWN_ORIGIN:
+            for key, cells, origin in rows:
+                if origin is Origin.BUILT_IN:
+                    item = QTreeWidgetItem(group, [*cells, "KOReader", ""])
+                else:
+                    item = QTreeWidgetItem(group, self._row(key, cells))
+                    item.setData(0, Qt.ItemDataRole.UserRole, key)
+                if cells[1] == UNKNOWN_ORIGIN:
                     item.setToolTip(1, UNKNOWN_HINT)
+                if key == selected:
+                    self.tree.setCurrentItem(item)
             group.setExpanded(True)
         minimum = self.fontMetrics().horizontalAdvance("M" * 14)  # readable when empty
         for column in range(len(COLUMNS) - 1):

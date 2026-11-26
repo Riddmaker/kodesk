@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
+import stat
+import urllib.request
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from kodesk.core.luadump import dump_file
+from kodesk.core.net import NetError, Response
 from kodesk.core.snapshot import SnapshotStore
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -233,3 +238,67 @@ def write_fake_catalogue(cache_dir: Path) -> None:
     index, patches = fake_catalogue()
     (cache_dir / "index.json").write_bytes(index)
     (cache_dir / "patches.json").write_bytes(patches)
+
+
+# -- fake GitHub for installs (B-08): invented repos and archives, never the network --
+
+
+def plugin_zip(files: dict[str, bytes], links: tuple[str, ...] = ()) -> bytes:
+    """A zip with ``files``; ``links`` are stored as symbolic links (a hostile archive)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+        for name in links:
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(info, "/etc/passwd")
+    return buffer.getvalue()
+
+
+def plugin_files(folder: str, version: str = "1.0") -> dict[str, bytes]:
+    return {
+        f"{folder}/main.lua": f"-- main {version}\n".encode(),
+        f"{folder}/_meta.lua": f'return {{ name = "x", version = "{version}" }}\n'.encode(),
+        f"{folder}/lib/util.lua": f"-- util {version}\n".encode(),
+    }
+
+
+class FakeGitHub:
+    """Answers like api.github.com, codeload and the asset host for the given URLs."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+        self.requests: list[str] = []
+
+    def __call__(self, url: str, headers: Mapping[str, str], limit: int) -> Response:
+        self.requests.append(url)
+        if url not in self.files:
+            raise NetError(f"{url}: HTTP 404", 404)
+        body = self.files[url]
+        if len(body) > limit:
+            raise NetError(f"{url}: too large")
+        return Response(200, None, body)
+
+    def release(self, owner: str, repo: str, tag: str, assets: dict[str, bytes]) -> None:
+        """A latest release whose assets carry GitHub's SHA-256 digest."""
+        listed = []
+        for name, data in assets.items():
+            url = f"https://github.com/{owner}/{repo}/releases/download/{tag}/{name}"
+            self.files[url] = data
+            digest = "sha256:" + hashlib.sha256(data).hexdigest()
+            listed.append({"name": name, "browser_download_url": url, "digest": digest})
+        body = {"tag_name": tag, "draft": False, "prerelease": False, "assets": listed}
+        api = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+        self.files[api] = json.dumps(body).encode()
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never hit the network (CLAUDE.md): any real request fails the test loudly."""
+
+    def refuse(_self: object, request: object, *_args: object, **_kwargs: object) -> None:
+        url = getattr(request, "full_url", request)
+        raise AssertionError(f"a test tried to reach the network: {url}")
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", refuse)

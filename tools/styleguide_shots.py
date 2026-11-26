@@ -19,13 +19,18 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QSlider, QToolButton
 from kodesk.core import catalogue as cat
 from kodesk.core import healthcheck
 from kodesk.core.install import find_install
+from kodesk.core.records import Records
 from kodesk.ui.app import MainWindow, reader_context
+from kodesk.ui.changes import prepare_entry
 from kodesk.ui.garage import View
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests.conftest import (  # pylint: disable=wrong-import-position
+    FakeGitHub,
     fake_catalogue,
     make_pocketbook,
+    plugin_files,
+    plugin_zip,
 )
 
 
@@ -54,14 +59,8 @@ def main(argv: list[str]) -> int:
         slider.setValue(slider.value() + 4)
         shot("garage-key-and-diff")
 
-        def grab_preview() -> None:  # the modal preview: picture it, then cancel (no write)
-            box = app.activeModalWidget()
-            assert isinstance(box, QMessageBox)
-            box.grab().save(str(out / f"write-preview{suffix}.png"))
-            box.reject()
-
         QStandardPaths.setTestModeEnabled(True)  # a write would snapshot into a test folder
-        QTimer.singleShot(300, grab_preview)
+        grab_modal(app, out / f"write-preview{suffix}.png")  # picture it, then cancel (no write)
         garage.write_changes()
         garage.select_key("home")
         shot("garage-home-locked")
@@ -75,9 +74,27 @@ def main(argv: list[str]) -> int:
         shot("garage-sleep")
         snapshot_shots(app, window, out, suffix)
         store_shot(app, window, out, suffix)
+        install_preview_shot(app, window, out, suffix)
         installed_shot(app, window, out, suffix)
         window.close()
     return 0
+
+
+def grab_modal(app: QApplication, path: Path, tries: int = 50) -> None:
+    """Once the next modal box is up, picture it and cancel it (waits for slow compositors)."""
+
+    def attempt(left: int) -> None:
+        box = app.activeModalWidget()
+        if isinstance(box, QMessageBox):
+            app.processEvents()
+            box.grab().save(str(path))
+            box.reject()
+        elif left > 0:
+            QTimer.singleShot(100, lambda: attempt(left - 1))
+        else:
+            raise SystemExit(f"no dialog appeared for {path.name}")
+
+    QTimer.singleShot(100, lambda: attempt(tries))
 
 
 def snapshot_shots(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:
@@ -117,6 +134,22 @@ def store_shot(app: QApplication, window: MainWindow, out: Path, suffix: str) ->
     store.details.readme.show_text(entry, README)
     app.processEvents()
     window.grab().save(str(out / f"store{suffix}.png"))
+
+
+def install_preview_shot(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:
+    """The preview before an install (fake GitHub, cancelled: nothing is written)."""
+    install = window.installed.install
+    entry = window.store.current()
+    assert install is not None and entry is not None
+    github = FakeGitHub()
+    data = plugin_zip(plugin_files("readingclock.koplugin", "1.2.0"))
+    github.release("bob", "readingclock.koplugin", "v1.2.0", {"readingclock.koplugin.zip": data})
+    with tempfile.TemporaryDirectory() as records:
+        prepared = prepare_entry(install.root, entry, Records(Path(records)), github)
+        grab_modal(app, out / f"install-preview{suffix}.png")
+        assert not window.changes.confirm(prepared)  # cancelled
+        if prepared.staging is not None:
+            shutil.rmtree(prepared.staging, ignore_errors=True)
 
 
 README = """# Reading clock

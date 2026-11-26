@@ -47,13 +47,13 @@ def open_external(url: QUrl | str) -> bool:
     return url.scheme() == "https" and QDesktopServices.openUrl(url)
 
 
-class _Results(QObject):
+class Results(QObject):
     """Carries a worker's result back to the GUI thread (signals across threads are queued)."""
 
     done = Signal(str, object)  # token, result or the exception
 
 
-def run_in_background(results: _Results, token: str, work: Callable[[], object]) -> None:
+def run_in_background(results: Results, token: str, work: Callable[[], object]) -> None:
     """Run ``work`` in the thread pool; ``results.done`` gets (token, result or exception)."""
 
     def run() -> None:
@@ -124,19 +124,25 @@ class EntryDetails(QWidget):
         self.link = QLabel(self)
         self.link.setObjectName("store-link")
         self.link.linkActivated.connect(open_external)
+        self.install_button = QPushButton("Ins&tall…", self)
+        self.install_button.setObjectName("store-install")
         self.readme = ReadmeView(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         for label in (self.title, self.facts, self.badges, self.link):
             label.setWordWrap(True)
             layout.addWidget(label)
+        row = QHBoxLayout()
+        row.addWidget(self.install_button)
+        row.addStretch(1)
+        layout.addLayout(row)
         for label in (self.title, self.facts, self.badges):  # index text is data, never markup
             label.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.readme, 1)
 
     def show_entry(self, entry: Entry | None, installed: bool) -> None:
         """Fill in ``entry``, or show a hint when nothing is selected."""
-        for widget in (self.facts, self.badges, self.link, self.readme):
+        for widget in (self.facts, self.badges, self.link, self.readme, self.install_button):
             widget.setVisible(entry is not None)
         if entry is None:
             self.title.setText("Select a plugin or patch to see its details.")
@@ -147,6 +153,7 @@ class EntryDetails(QWidget):
         badges += ["Archived"] if entry.archived else []
         badges.append("Compatibility not declared")
         self.badges.setText("  ·  ".join(badges))
+        self.install_button.setText("&Update…" if installed else "Ins&tall…")
         url = html.escape(entry.url, quote=True)
         self.link.setText(f'<a href="{url}">{url}</a>')
         what = "code" if entry.kind is Kind.PATCH else "README"
@@ -156,6 +163,9 @@ class EntryDetails(QWidget):
 class StorePage(QWidget):
     """Search and filter on top, the list on the left, the selected entry on the right."""
 
+    install_requested = Signal(object)  # Entry
+    loaded = Signal()  # a catalogue is shown
+
     def __init__(self, load: LoadCatalogue, fetch: FetchText, parent: QWidget | None) -> None:
         super().__init__(parent)
         self._load, self._fetch = load, fetch
@@ -163,7 +173,7 @@ class StorePage(QWidget):
         self._loading = False
         self._texts: dict[str, str] = {}
         self._installed: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
-        self._results = _Results(self)
+        self._results = Results(self)
         self._results.done.connect(self._finished)
         self._fetch_timer = QTimer(self)
         self._fetch_timer.setSingleShot(True)
@@ -192,6 +202,7 @@ class StorePage(QWidget):
         self.category.currentIndexChanged.connect(self.refilter)
         self.list.currentItemChanged.connect(lambda item, _old: self.show_entry(self._entry(item)))
         self.reload_button.clicked.connect(self.reload)
+        self.details.install_button.clicked.connect(self._install_clicked)
         self.search.returnPressed.connect(self.enter_results)
         find = QShortcut(QKeySequence(QKeySequence.StandardKey.Find), self)
         find.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -271,6 +282,7 @@ class StorePage(QWidget):
             f"{cat.built(catalogue)}{offline}"
         )
         self.refilter()
+        self.loaded.emit()
 
     def set_installed(self, plugins: frozenset[str], patches: frozenset[str]) -> None:
         """Names on the connected reader, to mark entries as installed."""
@@ -285,7 +297,7 @@ class StorePage(QWidget):
         return cat.is_installed(entry, *self._installed)
 
     def refilter(self) -> None:
-        """Rebuild the list from search text and filters; nothing is selected (no fetch)."""
+        """Rebuild the list from search text and filters; the selection stays if still shown."""
         if self.catalogue is None:
             return
         shown = cat.search(
@@ -297,6 +309,7 @@ class StorePage(QWidget):
         if not shown:
             self._message("Nothing matches.")
             return
+        kept = self.current()
         self.list.clear()
         for entry in shown:
             mark = "  ✓ installed" if self.installed(entry) else ""
@@ -306,7 +319,10 @@ class StorePage(QWidget):
             item = QListWidgetItem(f"{entry_title(entry)}{mark}\n{description}", self.list)
             item.setData(Qt.ItemDataRole.UserRole, entry)
             item.setToolTip(entry.description)
-        self.show_entry(None)
+            if kept is not None and entry.id == kept.id:
+                self.list.setCurrentItem(item)  # e.g. after an install: stay on it
+        if self.list.currentItem() is None:
+            self.show_entry(None)
 
     def enter_results(self) -> None:
         """Enter in the search field: go to the first result (keyboard only)."""
@@ -338,6 +354,11 @@ class StorePage(QWidget):
             self.details.readme.show_text(entry, self._texts[entry.id])
         else:
             self._fetch_timer.start()
+
+    def _install_clicked(self) -> None:
+        entry = self.current()
+        if entry is not None:
+            self.install_requested.emit(entry)
 
     def _fetch_current(self) -> None:
         entry = self.current()

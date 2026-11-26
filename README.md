@@ -2,7 +2,7 @@
 
 A desktop GUI to update KOReader on an e-reader (first target: PocketBook) and to browse, install, update and remove its community plugins and user patches — without breaking the reader's carefully built setup.
 
-**Status: early spike.** What runs today is the *Tuning-Garage* mockup: your reader drawn on screen (PocketBook Verse Pro Color), with KOReader's book view, menu, library and sleep screen. It reads the reader's settings and shows the changes you would make. It is **read-only**: nothing is written to the reader yet. Writing comes only after snapshot and restore exist.
+**Status: early, not yet tested on many readers.** What runs today: the *Tuning-Garage* (your reader drawn on screen — PocketBook Verse Pro Color — with KOReader's book view, menu, library and sleep screen; change settings and write exactly those keys), the *Store* (browse community plugins and user patches from the [KOReader plugin index](https://github.com/omer-faruq/koreader-plugin-index)), the *Installed* tab (install, update and remove plugins and patches, check for updates), and *snapshots*: before every write kodesk copies the reader's KOReader folder to your PC, checks afterwards that nothing else changed, and brings everything back with one click.
 
 ## Run
 

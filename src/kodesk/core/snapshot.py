@@ -342,7 +342,12 @@ def changed_protected(
     for path in before.keys() & now:
         if file_sha256(koreader_dir / path) != before[path].sha256:
             changed.add(path)
-    return tuple(sorted(changed - allowed))
+    return tuple(sorted(p for p in changed if not _allowed(p, allowed)))
+
+
+def _allowed(path: str, allowed: frozenset[str]) -> bool:
+    """``allowed`` holds files, and folders written with a trailing slash."""
+    return path in allowed or any(a.endswith("/") and path.startswith(a) for a in allowed)
 
 
 def guarded_write(
@@ -354,7 +359,8 @@ def guarded_write(
     """Snapshot, run ``write``, verify the protected files; restore on any failure.
 
     ``allowed`` names the protected files this write is meant to change (e.g. the Tuning-Garage
-    and ``settings.reader.lua``); every other protected file must stay byte-identical. After a
+    and ``settings.reader.lua``; a folder ends with ``/``, e.g. ``plugins/x.koplugin/`` for an
+    update of that plugin); every other protected file must stay byte-identical. After a
     good write the next connect checks KOReader's log (:mod:`kodesk.core.healthcheck`).
     """
     third_party = third_party_plugins(koreader_dir)
