@@ -22,6 +22,7 @@ from kodesk import APP_ID, APP_NAME, __version__
 from kodesk.core.devices import DEVICES
 from kodesk.core.install import InstallError, KOReaderInstall, find_install
 from kodesk.core.luadump import SettingsDocument
+from kodesk.core.settings_write import write_settings
 from kodesk.core.snapshot import SnapshotStore, device_id
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.screen import load_device_fonts
@@ -57,7 +58,7 @@ def _volume_root(install: KOReaderInstall) -> Path:
 
 
 def reader_context(install: KOReaderInstall) -> ReaderContext:
-    """Read everything the garage shows from a connected reader (read-only)."""
+    """Read everything the garage shows from a connected reader."""
     if install.device is None:
         raise InstallError(
             f"Reader model {install.model or 'unknown'} has no device definition yet."
@@ -77,7 +78,7 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
         library_entries=_library_entries(home_path),
         sleep_image=sleep if sleep.is_file() else None,
         plugins=install.plugins(),
-        source_label=f"KOReader {install.version or '?'} on {volume} (read-only)",
+        source_label=f"KOReader {install.version or '?'} on {volume}",
     )
 
 
@@ -138,6 +139,18 @@ class MainWindow(QMainWindow):
         if old is not None:
             old.deleteLater()
         self.statusBar().showMessage(context.source_label)
+        if install is not None:
+            self.garage.set_writer(
+                lambda before, after: self._write_settings(install, before, after)
+            )
+
+    @staticmethod
+    def _write_settings(
+        install: KOReaderInstall, before: SettingsDocument, after: SettingsDocument
+    ) -> str:
+        snapshot = write_settings(snapshot_store(install), install.root, before, after)
+        taken = snapshot.created.astimezone().strftime("%H:%M")
+        return f"Written to your reader. Snapshot from {taken} kept (Reader → Snapshots…)."
 
     def choose_reader(self) -> None:
         """Let the user pick a reader mount or KOReader folder."""

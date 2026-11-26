@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QMessageBox,
     QPushButton,
     QSlider,
     QSplitter,
@@ -209,6 +210,32 @@ class KeyPanel(QGroupBox):
             self.unlock.blockSignals(False)
 
 
+# Writes the edited settings to the reader; returns a short report for the status line.
+SettingsWriter = Callable[[SettingsDocument, SettingsDocument], str]
+
+
+class ChangesBox(QGroupBox):
+    """The pending changes and the button that writes them (only with a connected reader)."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__("Changed settings (not written yet)", parent)
+        self.writer: SettingsWriter | None = None
+        self.list = QListWidget(self)
+        self.list.setObjectName("changes")
+        self.write_button = QPushButton("Write to reader…", self)
+        self.write_button.setObjectName("write")
+        self.write_button.setEnabled(False)
+        self.write_button.setToolTip(
+            "Writes only the settings listed above, after a snapshot (Reader → Snapshots…)."
+        )
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.list)
+        layout.addWidget(self.write_button)
+
+    def lines(self) -> list[str]:
+        return [self.list.item(i).text() for i in range(self.list.count())]
+
+
 class TuningGarage(QWidget):
     """The Tuning-Garage: the drawn reader in the middle, its settings around it."""
 
@@ -240,8 +267,7 @@ class TuningGarage(QWidget):
         self.key_panel.invert.setChecked(self._value(INVERT_KEY) is True)
         self.key_panel.invert.toggled.connect(self._set_invert)
         self.key_panel.unlock.toggled.connect(self._set_unlocked_option)
-        self.changes = QListWidget(self)
-        self.changes.setObjectName("changes")
+        self.changes_box = ChangesBox(self)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self._build_center(view_switch))
@@ -281,20 +307,12 @@ class TuningGarage(QWidget):
         )
         self.panels.addWidget(self._library_panel())
         self.panels.addWidget(self._sleep_panel())
-        write_button = QPushButton("Write to reader", self)
-        write_button.setEnabled(False)
-        write_button.setToolTip(
-            "Writing comes with snapshot and one-click restore (B-04). This spike only previews."
-        )
-        changes_box = QGroupBox("Changed settings (not written yet)", self)
-        changes_layout = QVBoxLayout(changes_box)
-        changes_layout.addWidget(self.changes)
-        changes_layout.addWidget(write_button)
+        self.changes_box.write_button.clicked.connect(self.write_changes)
         right = QWidget(self)
         right_layout = QVBoxLayout(right)
         right_layout.addWidget(self.panels, 1)
         right_layout.addWidget(self.key_panel)
-        right_layout.addWidget(changes_box)
+        right_layout.addWidget(self.changes_box)
         return right
 
     # ----------------------------------------------------------------- settings model
@@ -330,7 +348,50 @@ class TuningGarage(QWidget):
             self._set_or_default(unlock.path, on, unlock.default)
 
     def changed(self) -> list[KeyPath]:
+        """Key paths whose value differs from the reader's own settings."""
         return changed_paths(self.original.data, self.edited.data)
+
+    def set_writer(self, writer: SettingsWriter | None) -> None:
+        """Allow writing (a connected reader); without a writer the garage only previews."""
+        self.changes_box.writer = writer
+        self.refresh()
+
+    def confirm_write(self, count: int) -> bool:
+        """Preview before write: the changes, the KOReader-closed hint, a named action."""
+        box = QMessageBox(self)
+        box.setObjectName("write-preview")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Write to your reader")
+        box.setText(
+            f"Write {count} changed setting{'s' if count != 1 else ''} to your reader? "
+            "kodesk takes a snapshot first; every other setting stays exactly as it is."
+        )
+        box.setInformativeText(
+            "Close KOReader on the reader first: it saves its own settings when it exits and "
+            "would overwrite these changes."
+        )
+        box.setDetailedText("\n".join(self.changes_box.lines()))
+        action = box.addButton(
+            f"Write {count} setting{'s' if count != 1 else ''}", QMessageBox.ButtonRole.AcceptRole
+        )
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is action
+
+    def write_changes(self) -> None:
+        """Write the pending changes through the writer; on success they become the baseline."""
+        count = len(self.changed())
+        writer = self.changes_box.writer
+        if writer is None or not count or not self.confirm_write(count):
+            return
+        try:
+            report = writer(self.original, self.edited)
+        except Exception as error:  # pylint: disable=broad-exception-caught  # shown, not raised
+            QMessageBox.warning(self, "Write to your reader", str(error))
+            return
+        self.original = self.edited
+        self.refresh()
+        self.status.setText(report)
 
     # ----------------------------------------------------------------- panels
 
@@ -535,11 +596,13 @@ class TuningGarage(QWidget):
     def refresh(self) -> None:
         """Redraw the screen and the list of pending changes."""
         self.device_view.set_screen(self.screen_image())
-        self.changes.clear()
+        box = self.changes_box
+        box.list.clear()
+        box.write_button.setEnabled(box.writer is not None and bool(self.changed()))
         for path in self.changed():
             old, new = self.original.get(path), self.edited.get(path)
             name = ".".join(str(part) for part in path)
-            self.changes.addItem(f"{name}: {_short(old)} → {_short(new)}")
+            box.list.addItem(f"{name}: {_short(old)} → {_short(new)}")
         if self.view is View.BOOK:
             book = self._book()
             self.status.setText(

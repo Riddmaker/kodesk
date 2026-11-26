@@ -13,8 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths
-from PySide6.QtWidgets import QApplication, QSlider, QToolButton
+from PySide6.QtCore import QStandardPaths, QTimer
+from PySide6.QtWidgets import QApplication, QMessageBox, QSlider, QToolButton
 
 from kodesk.core.install import find_install
 from kodesk.ui.app import MainWindow, reader_context
@@ -48,6 +48,16 @@ def main(argv: list[str]) -> int:
         assert slider is not None
         slider.setValue(slider.value() + 4)
         shot("garage-key-and-diff")
+
+        def grab_preview() -> None:  # the modal preview: picture it, then cancel (no write)
+            box = app.activeModalWidget()
+            assert isinstance(box, QMessageBox)
+            box.grab().save(str(out / f"write-preview{suffix}.png"))
+            box.reject()
+
+        QStandardPaths.setTestModeEnabled(True)  # a write would snapshot into a test folder
+        QTimer.singleShot(300, grab_preview)
+        garage.write_changes()
         garage.select_key("home")
         shot("garage-home-locked")
         for side in ("Bottom edge", "Front"):  # click the switch like a user would
@@ -58,13 +68,16 @@ def main(argv: list[str]) -> int:
                 shot("garage-bottom-edge")
         garage.set_view(View.SLEEP)
         shot("garage-sleep")
-        QStandardPaths.setTestModeEnabled(True)  # snapshots go to a test folder, not the user's
         dialog = window.show_snapshots()
         assert dialog is not None
         dialog.take()
         app.processEvents()
         dialog.grab().save(str(out / f"snapshots{suffix}.png"))
-        shutil.rmtree(dialog.store.base.parents[1])  # the test-mode app folder
+        test_home = dialog.store.base.parents[3]  # ~/.qttest/share/<app>/snapshots/<id>
+        shutil.rmtree(dialog.store.base.parents[1])
+        for folder in (test_home / "share", test_home):
+            if folder.is_dir() and not any(folder.iterdir()):
+                folder.rmdir()
         dialog.close()
         window.close()
     return 0

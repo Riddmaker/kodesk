@@ -231,3 +231,62 @@ def test_demo_reader_has_no_snapshots(qtbot: QtBot) -> None:
     window = MainWindow(demo_context())
     qtbot.addWidget(window)
     assert not window.snapshots_action.isEnabled() and window.show_snapshots() is None
+
+
+def _real_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[MainWindow, Path]:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    QStandardPaths.setTestModeEnabled(True)
+    koreader = make_reader(tmp_path / "PB634K3", "pocketbook")
+    (koreader / "version.log").write_text("2026-08-26, 08:01:22, v2026.07.1, PBVerseProColor\n")
+    install = find_install(tmp_path / "PB634K3")
+    return MainWindow(reader_context(install), install), koreader
+
+
+def test_write_to_reader_writes_one_line_after_a_snapshot(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, koreader = _real_reader(tmp_path, monkeypatch)
+    qtbot.addWidget(window)
+    garage = window.garage
+    assert not garage.changes_box.write_button.isEnabled()  # nothing changed yet
+    slider = garage.findChild(QSlider, "font-size")
+    assert slider is not None
+    slider.setValue(26)
+    assert garage.changes_box.write_button.isEnabled()
+    monkeypatch.setattr(TuningGarage, "confirm_write", lambda _self, count: count == 1)
+    qtbot.mouseClick(garage.changes_box.write_button, Qt.MouseButton.LeftButton)
+    assert '["copt_font_size"] = 26,' in (koreader / "settings.reader.lua").read_text()
+    assert garage.status.text().startswith("Written to your reader.")
+    assert not garage.changed() and not garage.changes_box.write_button.isEnabled()
+    assert install_snapshots(window) == 1
+
+
+def install_snapshots(window: MainWindow) -> int:
+    assert window.install is not None
+    return len(snapshot_store(window.install).snapshots())
+
+
+def test_write_refused_when_koreader_saved_in_between(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, koreader = _real_reader(tmp_path, monkeypatch)
+    qtbot.addWidget(window)
+    slider = window.garage.findChild(QSlider, "font-size")
+    assert slider is not None
+    slider.setValue(26)
+    settings = koreader / "settings.reader.lua"
+    settings.write_text(settings.read_text().replace("= 22,", "= 24,"))
+    warnings: list[str] = []
+    monkeypatch.setattr(TuningGarage, "confirm_write", lambda _self, _count: True)
+    monkeypatch.setattr(QMessageBox, "warning", lambda _p, _t, text: warnings.append(text))
+    qtbot.mouseClick(window.garage.changes_box.write_button, Qt.MouseButton.LeftButton)
+    assert "KOReader still open" in warnings[0]
+    assert '["copt_font_size"] = 24,' in settings.read_text()
+    assert window.garage.changed()  # the change is kept, nothing was written
+
+
+def test_garage_without_a_writer_cannot_write(garage: TuningGarage) -> None:
+    slider = garage.findChild(QSlider, "font-size")
+    assert slider is not None
+    slider.setValue(slider.value() + 2)
+    assert garage.changes_box.writer is None and not garage.changes_box.write_button.isEnabled()
