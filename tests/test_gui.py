@@ -348,3 +348,20 @@ def test_failed_plugin_after_a_write_offers_the_snapshot(
     qtbot.mouseClick(restore, Qt.MouseButton.LeftButton)
     assert len(previews) == 1  # preview before write, then restored
     assert '["copt_font_size"] = 22,' in (koreader / "settings.reader.lua").read_text()
+
+
+def test_snapshot_folder_keeps_older_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    QStandardPaths.setTestModeEnabled(True)
+    make_reader(tmp_path / "PB634K3", "pocketbook")
+    install = find_install(tmp_path / "PB634K3")
+    monkeypatch.setattr("kodesk.ui.app.volume_serial", lambda _device: "1234-ABCD")
+    fresh = snapshot_store(install).base
+    assert fresh.name == "Fake-PB634K3-1234-ABCD"
+    older = fresh.with_name("Fake-PB634K3")  # made before kodesk knew the serial
+    older.mkdir(parents=True)
+    assert snapshot_store(install).base == older
+    fresh.mkdir(parents=True)
+    assert snapshot_store(install).base == fresh

@@ -94,9 +94,9 @@ class RestorePlan:
         return bool(self.write or self.remove)
 
 
-def device_id(model: str | None, volume_label: str) -> str:
-    """A folder name for one reader: KOReader model + the volume's name, filesystem-safe."""
-    raw = f"{model or 'reader'}-{volume_label or 'volume'}"
+def device_id(model: str | None, volume_label: str, serial: str | None = None) -> str:
+    """A folder name for one reader: model, volume name and serial if known, filesystem-safe."""
+    raw = f"{model or 'reader'}-{volume_label or 'volume'}" + (f"-{serial}" if serial else "")
     return re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("._") or "reader"
 
 

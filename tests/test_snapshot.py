@@ -199,3 +199,9 @@ def test_protected_list() -> None:
 def test_device_id_is_a_safe_folder_name() -> None:
     assert device_id("PBVerseProColor", "PB634K3") == "PBVerseProColor-PB634K3"
     assert device_id(None, "../My Reader") == "reader-_My_Reader"
+
+
+def test_device_id_with_the_volume_serial() -> None:
+    assert (
+        device_id("PBVerseProColor", "PB634K3", "1234-ABCD") == "PBVerseProColor-PB634K3-1234-ABCD"
+    )

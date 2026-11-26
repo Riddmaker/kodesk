@@ -26,6 +26,7 @@ from kodesk.core.install import InstallError, KOReaderInstall, find_install
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.settings_write import write_settings
 from kodesk.core.snapshot import SnapshotStore, device_id
+from kodesk.core.volume import volume_serial
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.installed import InstalledPage
 from kodesk.ui.screen import load_device_fonts
@@ -89,7 +90,14 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
 def snapshot_store(install: KOReaderInstall) -> SnapshotStore:
     """This reader's snapshots in the platform's app data folder (never on the reader)."""
     data = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
-    return SnapshotStore(data / "snapshots" / device_id(install.model, _volume_root(install).name))
+    volume = _volume_root(install)
+    serial = volume_serial(
+        bytes(QStorageInfo(str(volume)).device().data()).decode(errors="replace")
+    )
+    base = data / "snapshots"
+    unique = base / device_id(install.model, volume.name, serial)
+    older = base / device_id(install.model, volume.name)  # before 2026-11-26: no serial
+    return SnapshotStore(older if older.is_dir() and not unique.is_dir() else unique)
 
 
 def store_page(offline: bool, parent: QWidget) -> StorePage:
