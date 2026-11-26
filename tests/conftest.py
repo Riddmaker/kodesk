@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import zipfile
 from collections.abc import Callable
@@ -144,3 +145,91 @@ def reader(tmp_path: Path) -> Path:
 @pytest.fixture
 def store(tmp_path: Path) -> SnapshotStore:
     return SnapshotStore(tmp_path / "data" / "snapshots" / "PBVerseProColor-PB634K3", _clock())
+
+
+# -- fake store catalogue (B-07): invented entries in the index's schema 2, never real data --
+
+FAKE_GENERATED_AT = "2026-11-26T12:55:30Z"
+
+
+def _fake_plugin(
+    owner: str, repo: str, stars: int, description: str, **extra: object
+) -> dict[str, object]:
+    return {
+        "id": f"{owner}/{repo}",
+        "owner": owner,
+        "repo": repo,
+        "url": f"https://github.com/{owner}/{repo}",
+        "description": description,
+        "purpose": "",
+        "categories": extra.pop("categories", ["ui"]),
+        "keywords": extra.pop("keywords", []),
+        "topics": ["koreader"],
+        "stars": stars,
+        "license": extra.pop("license", "GPL-3.0"),
+        "default_branch": "main",
+        "activity": "active",
+        "pushed_at": "2026-11-20T10:00:00Z",
+        "archived": False,
+        **extra,
+    }
+
+
+def fake_catalogue() -> tuple[bytes, bytes]:
+    """``index.json`` and ``patches.json`` bytes with a handful of made-up entries."""
+    plugins = [
+        _fake_plugin("alice", f"{THIRD_PARTY_PLUGIN}.koplugin", 900, "Cover grid for the library"),
+        _fake_plugin(
+            "bob", "readingclock.koplugin", 40, "Shows a clock while reading", keywords=["time"]
+        ),
+        _fake_plugin(
+            "carol", "dictsync", 120, "Sync dictionary lookups", categories=["dict", "sync"]
+        ),
+        _fake_plugin("mallory", "evil", 5000, "Not on GitHub", url="https://evil.example/m/evil"),
+        _fake_plugin("dave", "nolicence.koplugin", 3, "No licence given", license=None),
+    ]
+    patches = [
+        {
+            "id": f"erin/kopatches:{USER_PATCH}",
+            "owner": "erin",
+            "repo": "kopatches",
+            "path": USER_PATCH,
+            "url": f"https://github.com/erin/kopatches/blob/main/{USER_PATCH}",
+            "raw_url": f"https://raw.githubusercontent.com/erin/kopatches/main/{USER_PATCH}",
+            "purpose": "Tweaks the reader footer",
+            "categories": ["ui"],
+            "keywords": ["footer"],
+            "repo_stars": 60,
+            "file_modified_at": "2026-10-25T14:47:16Z",
+            "archived": False,
+            "activity": "active",
+        },
+        {
+            "id": "erin/kopatches:notlua.txt",
+            "owner": "erin",
+            "repo": "kopatches",
+            "path": "notlua.txt",
+            "url": "https://github.com/erin/kopatches/blob/main/notlua.txt",
+            "raw_url": "https://raw.githubusercontent.com/erin/kopatches/main/notlua.txt",
+        },
+    ]
+    index = {
+        "schema": 2,
+        "generated_at": FAKE_GENERATED_AT,
+        "categories": [
+            {"id": "ui", "label": "Interface"},
+            {"id": "dict", "label": "Dictionary & language"},
+            {"id": "sync", "label": "Sync"},
+        ],
+        "plugins": plugins,
+        "patches_url": "patches.json",
+    }
+    return json.dumps(index).encode(), json.dumps({"schema": 2, "patches": patches}).encode()
+
+
+def write_fake_catalogue(cache_dir: Path) -> None:
+    """Seed the catalogue cache (``kodesk --offline`` then shows it without any network)."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    index, patches = fake_catalogue()
+    (cache_dir / "index.json").write_bytes(index)
+    (cache_dir / "patches.json").write_bytes(patches)

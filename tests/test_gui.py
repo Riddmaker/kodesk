@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -14,7 +17,7 @@ from kodesk.core import healthcheck
 from kodesk.core.devices import Face
 from kodesk.core.install import find_install
 from kodesk.core.snapshot import RestorePlan, Snapshot, SnapshotStore
-from kodesk.ui.app import MainWindow, demo_context, main, reader_context, snapshot_store
+from kodesk.ui.app import MainWindow, demo_context, reader_context, snapshot_store
 from kodesk.ui.garage import TuningGarage, View
 from kodesk.ui.snapshots import SnapshotsDialog, human_size, plan_text
 from tests.conftest import make_pocketbook, make_reader
@@ -172,10 +175,17 @@ def test_hardware_keys_work_with_keyboard_only(qtbot: QtBot, garage: TuningGarag
     assert current_view(garage) is View.MENU
 
 
-def test_smoke_test_flag_starts_and_quits(qapp: object) -> None:
-    """What CI runs on every packaged build: the window opens and the app exits with 0."""
-    del qapp
-    assert main(["--demo", "--smoke-test"]) == 0
+def test_smoke_test_flag_starts_and_quits(tmp_path: Path) -> None:
+    """What CI runs on every packaged build: the window opens and the app exits with 0.
+
+    In its own process: once ``app.quit()`` ran, Qt ends every later event loop at once,
+    which would starve the tests after this one.
+    """
+    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "HOME": str(tmp_path)}
+    env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
+    command = [sys.executable, "-m", "kodesk", "--demo", "--offline", "--smoke-test"]
+    done = subprocess.run(command, env=env, capture_output=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr.decode(errors="replace")
 
 
 def test_snapshots_take_and_restore(

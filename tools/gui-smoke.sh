@@ -41,6 +41,10 @@ device="$work/PB634K3"
 PYTHONPATH="$repo/src:$repo" python -c \
     'import sys; from pathlib import Path; from tests.conftest import make_pocketbook; make_pocketbook(Path(sys.argv[1]))' \
     "$device"
+# Store: a fake catalogue in the cache and --offline below, so the run never goes online.
+PYTHONPATH="$repo/src:$repo" python -c \
+    'import sys; from pathlib import Path; from tests.conftest import write_fake_catalogue; write_fake_catalogue(Path(sys.argv[1]))' \
+    "$XDG_CACHE_HOME/kodesk/catalogue"
 
 cat > "$work/sway.conf" <<'CONF'
 output HEADLESS-1 resolution 1600x1000
@@ -75,7 +79,7 @@ wait_for 5 ipc_ready || { echo "sway IPC socket missing" >&2; exit 1; }
 SWAYSOCK="$(first_match "$XDG_RUNTIME_DIR"/sway-ipc.*.sock)"
 export SWAYSOCK
 
-QT_QPA_PLATFORM=wayland "$@" "$device" >"$out/app.log" 2>&1 &
+QT_QPA_PLATFORM=wayland "$@" --offline "$device" >"$out/app.log" 2>&1 &
 app_pid=$!
 window_up() { swaymsg -t get_tree | grep -q '"app_id": "io.github.riddmaker.kodesk"\|"app_id": "kodesk"'; }
 wait_for 20 window_up || {
@@ -114,6 +118,13 @@ press -M alt -k t -m alt
 sleep 1
 shot 07-snapshot-taken
 press -k Escape
+# Store tab (Alt+S): focus lands in the search field; type, Enter goes to the first result.
+press -M alt -k s -m alt
+sleep 1
+shot 08-store-offline-catalogue
+press clock -k Return
+sleep 1
+shot 09-store-search-selected
 press -M ctrl -k q -m ctrl
 exited() { ! kill -0 "$app_pid"; }
 if wait_for 5 exited; then app_pid=""; echo "app quit via Ctrl+Q"; else echo "app did not quit" >&2; exit 1; fi

@@ -16,13 +16,17 @@ from pathlib import Path
 from PySide6.QtCore import QStandardPaths, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QSlider, QToolButton
 
+from kodesk.core import catalogue as cat
 from kodesk.core import healthcheck
 from kodesk.core.install import find_install
 from kodesk.ui.app import MainWindow, reader_context
 from kodesk.ui.garage import View
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tests.conftest import make_pocketbook  # pylint: disable=wrong-import-position
+from tests.conftest import (  # pylint: disable=wrong-import-position
+    fake_catalogue,
+    make_pocketbook,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -33,7 +37,7 @@ def main(argv: list[str]) -> int:
     app = QApplication(["kodesk-styleguide"])
     with tempfile.TemporaryDirectory() as tmp:
         install = find_install(make_pocketbook(Path(tmp) / "PB634K3"))
-        window = MainWindow(reader_context(install), install)
+        window = MainWindow(reader_context(install), install, offline=True)  # never online
         window.resize(1400, 900)
         window.show()
         garage = window.garage
@@ -70,6 +74,7 @@ def main(argv: list[str]) -> int:
         garage.set_view(View.SLEEP)
         shot("garage-sleep")
         snapshot_shots(app, window, out, suffix)
+        store_shot(app, window, out, suffix)
         window.close()
     return 0
 
@@ -97,6 +102,33 @@ def snapshot_shots(app: QApplication, window: MainWindow, out: Path, suffix: str
         if folder.is_dir() and not any(folder.iterdir()):
             folder.rmdir()
     dialog.close()
+
+
+def store_shot(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:
+    """The Store tab on the fake catalogue, one entry selected with its README."""
+    store = window.store
+    store.set_catalogue(cat.parse(*fake_catalogue()))
+    window.tabs.setCurrentWidget(store)
+    store.search.setText("clock")
+    store.enter_results()
+    entry = store.current()
+    assert entry is not None
+    store.details.readme.show_text(entry, README)
+    app.processEvents()
+    window.grab().save(str(out / f"store{suffix}.png"))
+
+
+README = """# Reading clock
+
+Shows the time in the corner of the page while you read.
+
+## Install
+
+Copy `readingclock.koplugin` to `koreader/plugins/` and restart KOReader.
+
+- **Tap** the clock to hide it
+- See the [settings](https://github.com/bob/readingclock.koplugin#settings)
+"""
 
 
 if __name__ == "__main__":

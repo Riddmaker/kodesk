@@ -15,19 +15,22 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QWidget,
 )
 
 from kodesk import APP_ID, APP_NAME, __version__
-from kodesk.core import healthcheck
+from kodesk.core import catalogue, healthcheck
 from kodesk.core.devices import DEVICES
 from kodesk.core.install import InstallError, KOReaderInstall, find_install
+from kodesk.core.inventory import list_patches
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.settings_write import write_settings
 from kodesk.core.snapshot import SnapshotStore, device_id
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.screen import load_device_fonts
 from kodesk.ui.snapshots import SnapshotsDialog
+from kodesk.ui.store import StorePage
 
 DEMO_DEVICE = "pocketbook-verse-pro-color"
 BOOK_SUFFIXES = {".epub", ".pdf", ".fb2", ".mobi", ".azw3", ".djvu", ".cbz", ".txt"}
@@ -89,6 +92,20 @@ def snapshot_store(install: KOReaderInstall) -> SnapshotStore:
     return SnapshotStore(data / "snapshots" / device_id(install.model, _volume_root(install).name))
 
 
+def store_page(offline: bool, parent: QWidget) -> StorePage:
+    """The Store tab; ``offline`` never contacts the network (cached catalogue only)."""
+    cache = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)
+    cache_dir = Path(cache) / "catalogue"
+    get = None if offline else catalogue.https_get
+
+    def fetch(entry: catalogue.Entry) -> str:
+        if offline:
+            raise catalogue.CatalogueError("kodesk runs offline")
+        return catalogue.fetch_text(entry)
+
+    return StorePage(lambda: catalogue.load(cache_dir, get), fetch, parent)
+
+
 def detect_reader() -> KOReaderInstall | None:
     """First mounted volume that holds a KOReader installation."""
     for volume in QStorageInfo.mountedVolumes():
@@ -102,12 +119,23 @@ def detect_reader() -> KOReaderInstall | None:
 
 
 class MainWindow(QMainWindow):
-    """Main window: menu bar, the Tuning-Garage, and the reader source in the status bar."""
+    """Main window: menu bar, the Tuning-Garage and Store tabs, the reader in the status bar."""
 
-    def __init__(self, context: ReaderContext, install: KOReaderInstall | None = None) -> None:
+    def __init__(
+        self,
+        context: ReaderContext,
+        install: KOReaderInstall | None = None,
+        offline: bool = False,
+    ) -> None:
         super().__init__()
         self.install: KOReaderInstall | None = None
-        self.setWindowTitle(f"{APP_NAME} — Tuning-Garage")
+        self.tabs = QTabWidget(self)
+        self.tabs.setDocumentMode(True)
+        self.setCentralWidget(self.tabs)
+        self.store = store_page(offline, self)
+        self.tabs.addTab(self.store, "&Store")
+        self.tabs.currentChanged.connect(self._tab_changed)
+        self.setWindowTitle(APP_NAME)
         self.resize(1280, 860)
         open_action = QAction("&Open reader…", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -134,17 +162,27 @@ class MainWindow(QMainWindow):
         self.install = install
         self.snapshots_action.setEnabled(install is not None)
         self.snapshots_button.setVisible(install is not None)
+        old: QWidget | None = getattr(self, "garage", None)
         self.garage = TuningGarage(context, self)
-        old: QWidget | None = self.centralWidget()
-        self.setCentralWidget(self.garage)
         if old is not None:
+            self.tabs.removeTab(self.tabs.indexOf(old))
             old.deleteLater()
+        self.tabs.insertTab(0, self.garage, "Tuning-&Garage")
+        self.tabs.setCurrentIndex(0)
+        plugins = frozenset(install.plugins()) if install else frozenset()
+        patches = frozenset(p.name for p in list_patches(install.root)) if install else frozenset()
+        self.store.set_installed(plugins, patches)
         self.statusBar().showMessage(context.source_label)
         if install is not None:
             self.garage.set_writer(
                 lambda before, after: self._write_settings(install, before, after)
             )
             QTimer.singleShot(0, self.check_health)
+
+    def _tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self.store:
+            self.store.ensure_loaded()  # no network before the user opens the Store
+            self.store.search.setFocus()
 
     @staticmethod
     def _write_settings(
@@ -225,6 +263,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=APP_NAME)
     parser.add_argument("path", nargs="?", type=Path, help="reader mount point or KOReader folder")
     parser.add_argument("--demo", action="store_true", help="ignore connected readers")
+    parser.add_argument(
+        "--offline", action="store_true", help="never go online (store: last cached catalogue)"
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--smoke-test",
@@ -248,7 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 context, install = reader_context(found), found
         except (InstallError, OSError) as error:
             print(f"{APP_NAME}: {error}; showing the demo reader", file=sys.stderr)
-    window = MainWindow(context, install)
+    window = MainWindow(context, install, offline=args.offline)
     window.show()
     if args.smoke_test:
         QTimer.singleShot(0, app.quit)

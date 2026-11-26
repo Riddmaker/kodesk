@@ -13,6 +13,7 @@ nix develop                     # dev shell with Python, PySide6, linters, sway/
 python -m kodesk                # first connected reader, or the demo reader
 python -m kodesk /run/media/$USER/PB634K3   # a specific reader mount (or its koreader/ folder)
 python -m kodesk --demo         # demo reader, ignore connected readers
+python -m kodesk --offline      # never go online (the Store shows its last cached catalogue)
 ```
 
 Without Nix: `pip install -e .` in a virtualenv, then `kodesk`.
