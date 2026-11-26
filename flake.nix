@@ -105,7 +105,7 @@
             pkgs.qt6.qtwayland
             pkgs.qt6.qtsvg
             # headless GUI checks (HABIT 7)
-            pkgs.sway
+            pkgs.sway-unwrapped # no dbus-run-session wrapper: CI runners lack /etc/dbus-1
             pkgs.grim
             pkgs.wtype
             pkgs.desktop-file-utils

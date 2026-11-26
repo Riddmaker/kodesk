@@ -31,6 +31,9 @@ export HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_DATA_HOME="$work/dat
 export XDG_CACHE_HOME="$work/cache" XDG_RUNTIME_DIR="$work/run"
 # Same look as CI: Qt's built-in style, not the desktop's theme engine (Kvantum, qt6ct).
 unset QT_STYLE_OVERRIDE QT_QPA_PLATFORMTHEME QT_PLUGIN_PATH_OVERRIDE
+# No session bus: point at a socket that never exists, so neither the desktop's bus nor an
+# autolaunched one (which would start portals/gvfs and leave FUSE mounts in the temp dir) is used.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$work/no-session-bus"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
