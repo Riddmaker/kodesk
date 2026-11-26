@@ -1,0 +1,3 @@
+# Exact versions for the PyInstaller bundles (Windows, macOS); same Qt as the Nix build.
+PySide6==6.12.0
+pyinstaller==6.22.3

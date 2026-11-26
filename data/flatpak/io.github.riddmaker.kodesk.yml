@@ -1,0 +1,45 @@
+# Flatpak manifest (B-01 spike; Flathub submission is a later adoption step).
+#   flatpak-builder --user --install --force-clean build-dir data/flatpak/io.github.riddmaker.kodesk.yml
+# Runtime and BaseApp pairing as in Flathub's io.github.ciromattia.kcc manifest
+# (docs/research/packaging/ci-packaging-facts-2026-11-26.html).
+id: io.github.riddmaker.kodesk
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+base: io.qt.PySide.BaseApp
+base-version: '6.11'
+command: kodesk
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # The reader is a USB mass-storage volume. Read-only until snapshot/restore exists (B-04);
+  # no network until the store/update features need it (B-06).
+  - --filesystem=/run/media:ro
+  - --filesystem=/media:ro
+build-options:
+  env:
+    BASEAPP_REMOVE_WEBENGINE: '1'
+cleanup-commands:
+  - /app/cleanup-BaseApp.sh
+modules:
+  - name: kodesk
+    buildsystem: simple
+    build-commands:
+      # Plain copy instead of pip: kodesk is pure Python and needs no build backend offline.
+      - mkdir -p ${FLATPAK_DEST}/share/kodesk
+      - cp -r src/kodesk ${FLATPAK_DEST}/share/kodesk/
+      - install -Dm755 data/flatpak/kodesk.sh ${FLATPAK_DEST}/bin/kodesk
+      - install -Dm644 data/io.github.riddmaker.kodesk.desktop -t ${FLATPAK_DEST}/share/applications
+      - install -Dm644 data/io.github.riddmaker.kodesk.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo
+      - install -Dm644 data/icons/io.github.riddmaker.kodesk.svg -t ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - docs
+          - result
+          - build-dir
+          - .flatpak-builder

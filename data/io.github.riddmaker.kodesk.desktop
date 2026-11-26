@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=kodesk
+GenericName=E-Reader Companion
+Comment=Update, extend and tune KOReader on your e-reader without breaking your setup
+Comment[de]=KOReader auf deinem E-Reader aktualisieren, erweitern und anpassen, ohne dein Setup zu beschädigen
+Exec=kodesk
+Icon=io.github.riddmaker.kodesk
+Terminal=false
+Categories=Utility;Qt;
+Keywords=KOReader;e-reader;ebook;PocketBook;Kobo;Kindle;plugin;
+StartupWMClass=kodesk
