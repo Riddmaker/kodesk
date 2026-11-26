@@ -43,12 +43,14 @@ from kodesk.core.install import KOReaderInstall, volume_root
 from kodesk.core.installer import write_file
 from kodesk.core.net import Get, NetError, Save
 from kodesk.core.snapshot import (
+    Progress,
     Snapshot,
     SnapshotStore,
     WriteRejectedError,
     file_sha256,
     guarded_write,
     is_protected,
+    no_progress,
 )
 
 PENDING_FILE = "pending-update.json"
@@ -245,7 +247,11 @@ def _remove_empty_dirs(folder: Path, stop: Path) -> None:
 
 
 def apply_update(
-    store: SnapshotStore, install: KOReaderInstall, plan: UpdatePlan, keep: frozenset[str]
+    store: SnapshotStore,
+    install: KOReaderInstall,
+    plan: UpdatePlan,
+    keep: frozenset[str],
+    progress: Progress = no_progress,
 ) -> Snapshot:
     """Snapshot, write the new release (except the ``keep`` files the user changed), verify.
 
@@ -282,7 +288,7 @@ def apply_update(
     launcher = layout.launcher
     outside = (PurePosixPath(launcher).name,) if launcher and launcher in writes else ()
     try:
-        snapshot = guarded_write(store, install.root, write, (), outside)
+        snapshot = guarded_write(store, install.root, write, (), outside, progress)
     except WriteRejectedError:
         clear(store.base)  # restored: nothing is pending
         raise

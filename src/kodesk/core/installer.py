@@ -28,7 +28,14 @@ from kodesk.core.archive import PLUGIN_SUFFIX, ArchiveError, StagedPlugin, safe_
 from kodesk.core.catalogue import Entry, Kind
 from kodesk.core.inventory import RUN_PRIORITIES, built_in_plugins, patch_priority
 from kodesk.core.records import Record, Records
-from kodesk.core.snapshot import Snapshot, SnapshotStore, file_sha256, guarded_write
+from kodesk.core.snapshot import (
+    Progress,
+    Snapshot,
+    SnapshotStore,
+    file_sha256,
+    guarded_write,
+    no_progress,
+)
 from kodesk.core.sources import Download
 
 TEMP_SUFFIX = ".kodesk-tmp"
@@ -267,7 +274,13 @@ def _remove_empty_dirs(folder: Path, including_self: bool) -> None:
         folder.rmdir()
 
 
-def apply(store: SnapshotStore, koreader_dir: Path, change: Change, records: Records) -> Snapshot:
+def apply(
+    store: SnapshotStore,
+    koreader_dir: Path,
+    change: Change,
+    records: Records,
+    progress: Progress = no_progress,
+) -> Snapshot:
     """Snapshot, write ``change``, verify; the snapshot is restored if anything goes wrong."""
     root = koreader_dir.resolve()
 
@@ -302,7 +315,7 @@ def apply(store: SnapshotStore, koreader_dir: Path, change: Change, records: Rec
             _remove_empty_dirs(koreader_dir / change.target, change.action is Action.REMOVE)
 
     allowed = {change.target + "/" if change.kind is Kind.PLUGIN else change.target}
-    snapshot = guarded_write(store, koreader_dir, write, allowed)
+    snapshot = guarded_write(store, koreader_dir, write, allowed, progress=progress)
     if change.action is Action.REMOVE:
         records.drop(change.kind, change.name)
     elif change.record is not None:

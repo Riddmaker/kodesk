@@ -35,7 +35,7 @@ from kodesk.core.catalogue import Kind
 from kodesk.core.install import KOReaderInstall
 from kodesk.core.net import CancelledError, Get, NetError, Save
 from kodesk.core.snapshot import SnapshotError, SnapshotStore
-from kodesk.ui.snapshots import busy, path_lines
+from kodesk.ui.snapshots import path_lines, with_snapshot_progress
 from kodesk.ui.store import Results, run_in_background
 
 FAILURES = (update.UpdateError, NetError, ArchiveError, SnapshotError, OSError)
@@ -300,7 +300,10 @@ class KOReaderUpdater(QObject):
             return False
         store, install = self.store_for(self.install), self.install
         try:
-            busy(lambda: update.apply_update(store, install, plan, keep))
+            with_snapshot_progress(
+                self.window,
+                lambda progress: update.apply_update(store, install, plan, keep, progress),
+            )
         except FAILURES as error:
             self._warn(f"KOReader was not updated, your reader is as before: {error}")
             self.changed()

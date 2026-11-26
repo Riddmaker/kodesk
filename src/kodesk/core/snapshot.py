@@ -16,6 +16,10 @@ Only the names in :data:`OUTSIDE` are accepted, nothing else outside the folder.
 The never-touch list (ARCHITECTURE-SECURITY §4) is :func:`is_protected`. :func:`guarded_write`
 runs one write between a snapshot and a byte-for-byte check of the protected files; a mismatch
 or a failed write restores the snapshot.
+
+Taking a snapshot reads the whole folder (~380 MB on the reference reader), so it reports its
+progress in bytes; the progress callback may raise :class:`SnapshotCancelledError` to stop it,
+which is safe because nothing has been written to the reader yet.
 """
 
 from __future__ import annotations
@@ -55,6 +59,20 @@ _UNSAFE_PATH = re.compile(r"[\\\0]|^[A-Za-z]:")  # backslash, NUL, drive letter
 
 class SnapshotError(Exception):
     """A snapshot could not be taken, read or restored."""
+
+
+class SnapshotCancelledError(SnapshotError):
+    """The user stopped taking a snapshot; nothing was written to the reader."""
+
+    def __init__(self) -> None:
+        super().__init__("cancelled before anything was written; your reader is as before")
+
+
+Progress = Callable[[int, int], None]  # bytes read so far, bytes in total
+
+
+def no_progress(_done: int, _total: int) -> None:
+    """The default progress callback: report nothing."""
 
 
 class WriteRejectedError(SnapshotError):
@@ -195,10 +213,13 @@ class SnapshotStore:
 
     # -- taking ---------------------------------------------------------------------------
 
-    def take(self, koreader_dir: Path, outside: Iterable[str] = ()) -> Snapshot:
+    def take(
+        self, koreader_dir: Path, outside: Iterable[str] = (), progress: Progress = no_progress
+    ) -> Snapshot:
         """Copy every file (not cache/, not the log) to the store; the manifest is written last.
 
         ``outside`` names files beside the folder to keep too (only names in :data:`OUTSIDE`).
+        ``progress`` is called before the first file and after each one.
         """
         paths = walk(koreader_dir)
         extra = [
@@ -206,13 +227,17 @@ class SnapshotStore:
             for name in sorted(set(outside))
             if _outside_target(koreader_dir, f"../{name}").is_file()
         ]
-        self._check_free_space(koreader_dir, [*paths, *extra])
+        sizes = {p: (koreader_dir / p).stat().st_size for p in [*paths, *extra]}
+        total = sum(sizes.values())
+        self._check_free_space(total)
         self.blobs.mkdir(parents=True, exist_ok=True)
         self.manifests.mkdir(parents=True, exist_ok=True)
         entries: list[FileEntry] = []
         beside: list[FileEntry] = []
         temp = self.blobs / f"incoming{TEMP_SUFFIX}"
+        done = 0
         try:
+            progress(done, total)
             for relative in [*paths, *extra]:
                 source = (
                     _outside_target(koreader_dir, relative)
@@ -228,6 +253,8 @@ class SnapshotStore:
                     temp.replace(blob)
                 entry = FileEntry(relative, source.stat().st_size, digest)
                 (beside if relative.startswith("../") else entries).append(entry)
+                done += sizes[relative]
+                progress(done, total)
         finally:
             temp.unlink(missing_ok=True)
         snapshot = Snapshot(self._new_id(), self._clock(), tuple(entries), tuple(beside))
@@ -235,9 +262,8 @@ class SnapshotStore:
         self.prune()
         return snapshot
 
-    def _check_free_space(self, koreader_dir: Path, paths: Iterable[str]) -> None:
-        # "../koreader.app" is the file beside the folder, as in take
-        needed = sum((koreader_dir / p).stat().st_size for p in paths) + FREE_SPACE_MARGIN
+    def _check_free_space(self, size: int) -> None:
+        needed = size + FREE_SPACE_MARGIN
         self.base.mkdir(parents=True, exist_ok=True)
         free = shutil.disk_usage(self.base).free
         if free < needed:
@@ -394,12 +420,13 @@ def _allowed(path: str, allowed: frozenset[str]) -> bool:
     return path in allowed or any(a.endswith("/") and path.startswith(a) for a in allowed)
 
 
-def guarded_write(
+def guarded_write(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     store: SnapshotStore,
     koreader_dir: Path,
     write: Callable[[], None],
     allowed: Iterable[str] = (),
     outside: Iterable[str] = (),
+    progress: Progress = no_progress,
 ) -> Snapshot:
     """Snapshot, run ``write``, verify the protected files; restore on any failure.
 
@@ -408,9 +435,10 @@ def guarded_write(
     update of that plugin); every other protected file must stay byte-identical. ``outside``
     names files beside the folder the write changes (see :data:`OUTSIDE`). After a
     good write the next connect checks KOReader's log (:mod:`kodesk.core.healthcheck`).
+    ``progress`` reports the snapshot (see :meth:`SnapshotStore.take`).
     """
     third_party = third_party_plugins(koreader_dir)
-    snapshot = store.take(koreader_dir, outside)
+    snapshot = store.take(koreader_dir, outside, progress)
     try:
         write()
     except Exception as error:  # pylint: disable=broad-exception-caught  # any failure: undo

@@ -14,16 +14,18 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QSlider, QToolButton
+from PySide6.QtWidgets import QApplication, QDialog, QProgressDialog, QSlider, QToolButton
 
 from kodesk.core import catalogue as cat
 from kodesk.core import healthcheck, update
 from kodesk.core.install import find_install
 from kodesk.core.records import Records
+from kodesk.core.snapshot import Progress
 from kodesk.ui.app import MainWindow, reader_context
 from kodesk.ui.changes import prepare_entry
 from kodesk.ui.garage import View
 from kodesk.ui.koupdate import UpdateDialog
+from kodesk.ui.snapshots import with_snapshot_progress
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests.conftest import (  # pylint: disable=wrong-import-position
@@ -76,6 +78,7 @@ def main(argv: list[str]) -> int:
         garage.set_view(View.SLEEP)
         shot("garage-sleep")
         snapshot_shots(app, window, out, suffix)
+        snapshot_progress_shot(app, window, out, suffix)
         store_shot(app, window, out, suffix)
         install_preview_shot(app, window, out, suffix)
         installed_shot(app, window, out, suffix)
@@ -124,6 +127,21 @@ def snapshot_shots(app: QApplication, window: MainWindow, out: Path, suffix: str
         if folder.is_dir() and not any(folder.iterdir()):
             folder.rmdir()
     dialog.close()
+
+
+def snapshot_progress_shot(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:
+    """The progress dialog while a snapshot reads the reader (no file is read or written)."""
+
+    def action(progress: Progress) -> None:
+        progress(0, 380 * 2**20)
+        progress(152 * 2**20, 380 * 2**20)
+        dialog = window.findChild(QProgressDialog, "snapshot-progress")
+        assert dialog is not None
+        dialog.show()  # shown at once for the picture, not after its usual delay
+        app.processEvents()
+        dialog.grab().save(str(out / f"snapshot-progress{suffix}.png"))
+
+    with_snapshot_progress(window, action)
 
 
 def store_shot(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:

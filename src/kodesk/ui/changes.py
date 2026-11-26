@@ -24,7 +24,7 @@ from kodesk.core.installer import Action, Change, InstallerError
 from kodesk.core.net import Get, NetError
 from kodesk.core.records import Record, Records, RecordsError
 from kodesk.core.snapshot import SnapshotError, SnapshotStore
-from kodesk.ui.snapshots import busy, path_lines
+from kodesk.ui.snapshots import path_lines, with_snapshot_progress
 from kodesk.ui.store import Results, run_in_background
 
 ACTION_WORD = {Action.INSTALL: "Install", Action.UPDATE: "Update", Action.REMOVE: "Remove"}
@@ -283,7 +283,10 @@ class ChangeRunner(QObject):
             return False
         store, root = self.store_for(self.install), self.install.root
         try:
-            busy(lambda: installer.apply(store, root, change, records))
+            with_snapshot_progress(
+                self.window,
+                lambda progress: installer.apply(store, root, change, records, progress),
+            )
         except FAILURES as error:
             self._warn(f"{ACTION_WORD[change.action]} failed, your reader is as before: {error}")
             self.changed()

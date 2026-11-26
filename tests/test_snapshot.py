@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ import pytest
 from kodesk.core import snapshot as snap
 from kodesk.core.snapshot import (
     RestorePlan,
+    SnapshotCancelledError,
     SnapshotError,
     SnapshotStore,
     WriteRejectedError,
@@ -157,6 +159,32 @@ def test_symlinks_are_refused(reader: Path, store: SnapshotStore) -> None:
     (reader / "settings" / "link").symlink_to("/etc/hostname")
     with pytest.raises(SnapshotError, match="symbolic link"):
         store.take(reader)
+
+
+def test_snapshot_reports_its_progress_in_bytes(reader: Path, store: SnapshotStore) -> None:
+    calls: list[tuple[int, int]] = []
+    taken = store.take(reader, progress=lambda done, total: calls.append((done, total)))
+    total = taken.size
+    assert calls[0] == (0, total) and calls[-1] == (total, total)
+    assert len(calls) == len(taken.files) + 1
+    assert all(a[0] <= b[0] and a[1] == total for a, b in pairwise(calls))
+
+
+def test_cancelled_snapshot_writes_nothing(reader: Path, store: SnapshotStore) -> None:
+    original = _tree(reader)
+    written: list[bool] = []
+
+    def cancel_halfway(done: int, total: int) -> None:
+        if done > total // 2:
+            raise SnapshotCancelledError
+
+    with pytest.raises(SnapshotCancelledError, match="your reader is as before"):
+        guarded_write(store, reader, lambda: written.append(True), progress=cancel_halfway)
+    assert not written and not store.snapshots() and _tree(reader) == original
+    store.take(reader)  # the next snapshot drops what the cancelled one had copied
+    assert {b.name for b in store.blobs.glob("*/*")} == {
+        e.sha256 for e in store.snapshots()[0].files
+    }
 
 
 def test_interrupted_snapshot_leaves_no_manifest(

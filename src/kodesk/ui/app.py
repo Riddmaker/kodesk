@@ -33,7 +33,7 @@ from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.installed import InstalledPage
 from kodesk.ui.koupdate import KOReaderUpdater
 from kodesk.ui.screen import load_device_fonts
-from kodesk.ui.snapshots import SnapshotsDialog
+from kodesk.ui.snapshots import SnapshotsDialog, with_snapshot_progress
 from kodesk.ui.store import StorePage
 
 DEMO_DEVICE = "pocketbook-verse-pro-color"
@@ -253,11 +253,13 @@ class MainWindow(QMainWindow):
             self.store.ensure_loaded()  # no network before the user opens the Store
             self.store.search.setFocus()
 
-    @staticmethod
     def _write_settings(
-        install: KOReaderInstall, before: SettingsDocument, after: SettingsDocument
+        self, install: KOReaderInstall, before: SettingsDocument, after: SettingsDocument
     ) -> str:
-        snapshot = write_settings(snapshot_store(install), install.root, before, after)
+        store = snapshot_store(install)
+        snapshot = with_snapshot_progress(
+            self, lambda progress: write_settings(store, install.root, before, after, progress)
+        )
         taken = snapshot.created.astimezone().strftime("%H:%M")
         return f"Written to your reader. Snapshot from {taken} kept (Reader → Snapshots…)."
 

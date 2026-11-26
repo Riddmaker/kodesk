@@ -14,14 +14,26 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from kodesk.core.snapshot import RestorePlan, Snapshot, SnapshotError, SnapshotStore
+from kodesk import APP_NAME
+from kodesk.core.snapshot import (
+    Progress,
+    RestorePlan,
+    Snapshot,
+    SnapshotCancelledError,
+    SnapshotError,
+    SnapshotStore,
+)
 
 MAX_LISTED = 30  # files named in the restore preview; the rest is counted
+STEPS = 1000  # progress bar resolution
+TAKING = "Taking a snapshot of your reader first…"
+WRITING = "Writing to your reader…"
 
 
 def snapshot_label(snapshot: Snapshot) -> str:
@@ -60,6 +72,42 @@ def busy[T](action: Callable[[], T]) -> T:
         return action()
     finally:
         QGuiApplication.restoreOverrideCursor()
+
+
+def with_snapshot_progress[T](
+    parent: QWidget | None, action: Callable[[Progress], T], then: str | None = WRITING
+) -> T:
+    """Run ``action`` (a guarded write, or a snapshot alone) behind a modal progress dialog.
+
+    Reading the whole KOReader folder takes a while over USB, so the snapshot shows bytes read
+    and can be cancelled (nothing is written yet). Once it is complete, the dialog says ``then``
+    and cannot be cancelled any more: a write is never stopped halfway. On the UI thread like
+    :func:`busy`: a modal QProgressDialog processes events in ``setValue``, so Cancel works.
+    """
+    dialog = QProgressDialog(TAKING, "Cancel", 0, STEPS, parent)
+    dialog.setObjectName("snapshot-progress")
+    dialog.setWindowTitle(APP_NAME)
+    dialog.setWindowModality(Qt.WindowModality.WindowModal)
+    dialog.setAutoReset(False)
+    dialog.setAutoClose(False)
+    dialog.setMinimumDuration(400)
+
+    def report(done: int, total: int) -> None:
+        if dialog.wasCanceled():
+            raise SnapshotCancelledError
+        dialog.setLabelText(f"{TAKING}\n{human_size(done)} of {human_size(total)} read")
+        dialog.setValue(STEPS if done >= total else done * STEPS // max(total, 1))
+        if dialog.wasCanceled():
+            raise SnapshotCancelledError
+        if done >= total and then is not None:
+            dialog.setLabelText(then)
+            dialog.setCancelButton(None)  # Qt: None removes the button
+
+    try:
+        return busy(lambda: action(report))
+    finally:
+        dialog.close()
+        dialog.deleteLater()
 
 
 class SnapshotsDialog(QDialog):
@@ -121,7 +169,9 @@ class SnapshotsDialog(QDialog):
     def take(self) -> None:
         """Take a snapshot now (reads the reader, writes only to this PC)."""
         try:
-            busy(lambda: self.store.take(self.koreader_dir))
+            with_snapshot_progress(
+                self, lambda progress: self.store.take(self.koreader_dir, (), progress), None
+            )
         except (SnapshotError, OSError) as error:
             QMessageBox.warning(self, self.windowTitle(), f"No snapshot taken: {error}")
         self.refresh()

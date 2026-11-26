@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kodesk.core.luadump import SettingsDocument
-from kodesk.core.snapshot import Snapshot, SnapshotStore, guarded_write
+from kodesk.core.snapshot import Progress, Snapshot, SnapshotStore, guarded_write, no_progress
 
 SETTINGS_FILE = "settings.reader.lua"
 TEMP_SUFFIX = ".kodesk-tmp"
@@ -25,7 +25,11 @@ class StaleSettingsError(Exception):
 
 
 def write_settings(
-    store: SnapshotStore, koreader_dir: Path, before: SettingsDocument, after: SettingsDocument
+    store: SnapshotStore,
+    koreader_dir: Path,
+    before: SettingsDocument,
+    after: SettingsDocument,
+    progress: Progress = no_progress,
 ) -> Snapshot:
     """Replace the settings file with ``after``; returns the snapshot taken first."""
     target = koreader_dir / SETTINGS_FILE
@@ -43,4 +47,4 @@ def write_settings(
         if target.read_bytes() != new:
             raise OSError(f"{SETTINGS_FILE} reads back differently after writing")
 
-    return guarded_write(store, koreader_dir, write, allowed={SETTINGS_FILE})
+    return guarded_write(store, koreader_dir, write, allowed={SETTINGS_FILE}, progress=progress)

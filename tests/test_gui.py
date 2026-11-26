@@ -10,16 +10,36 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QStandardPaths, Qt
-from PySide6.QtWidgets import QCheckBox, QListWidget, QMessageBox, QSlider
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QListWidget,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QSlider,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from kodesk.core import healthcheck
 from kodesk.core.devices import Face
 from kodesk.core.install import find_install
-from kodesk.core.snapshot import RestorePlan, Snapshot, SnapshotStore
+from kodesk.core.snapshot import (
+    Progress,
+    RestorePlan,
+    Snapshot,
+    SnapshotCancelledError,
+    SnapshotStore,
+)
 from kodesk.ui.app import MainWindow, demo_context, reader_context, snapshot_store
 from kodesk.ui.garage import TuningGarage, View
-from kodesk.ui.snapshots import SnapshotsDialog, human_size, plan_text
+from kodesk.ui.snapshots import (
+    WRITING,
+    SnapshotsDialog,
+    human_size,
+    plan_text,
+    with_snapshot_progress,
+)
 from tests.conftest import make_pocketbook, make_reader
 
 pytestmark = pytest.mark.gui
@@ -225,6 +245,50 @@ def test_return_does_not_take_a_snapshot(qtbot: QtBot, tmp_path: Path) -> None:
     dialog.show()
     qtbot.keyClick(dialog.list, Qt.Key.Key_Return)
     assert not store.snapshots() and dialog.isVisible()
+
+
+def _progress_dialog(parent: QWidget) -> QProgressDialog:
+    dialog = parent.findChild(QProgressDialog, "snapshot-progress")
+    assert dialog is not None
+    return dialog
+
+
+def test_snapshot_progress_can_be_cancelled_before_the_write(qtbot: QtBot) -> None:
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    written: list[bool] = []
+
+    def action(progress: Progress) -> None:
+        progress(0, 300 * 2**20)
+        _progress_dialog(parent).cancel()
+        progress(100 * 2**20, 300 * 2**20)
+        written.append(True)
+
+    with pytest.raises(SnapshotCancelledError):
+        with_snapshot_progress(parent, action)
+    assert not written
+
+
+def test_snapshot_progress_then_shows_the_write_without_cancel(qtbot: QtBot) -> None:
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    seen: list[str] = []
+
+    def action(progress: Progress) -> str:
+        progress(0, 2**20)
+        assert "0 MB of 1 MB" in _progress_dialog(parent).labelText() or "kB of" in (
+            _progress_dialog(parent).labelText()
+        )
+        progress(2**20, 2**20)
+        dialog = _progress_dialog(parent)
+        seen.append(dialog.labelText())
+        assert dialog.value() == dialog.maximum()
+        assert dialog.findChild(QPushButton) is None  # a write is never stopped halfway
+        return "done"
+
+    assert with_snapshot_progress(parent, action) == "done"
+    assert seen == [WRITING]
+    assert not _progress_dialog(parent).isVisible()
 
 
 def test_sizes_are_readable() -> None:
