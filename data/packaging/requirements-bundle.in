@@ -1,0 +1,5 @@
+# Top-level packages for the PyInstaller bundles (Windows, macOS). Same Qt as the Nix build.
+# Essentials only: QtCore, QtGui, QtWidgets and the image plugins; no WebEngine/Addons.
+# Edit here, then run tools/lock-requirements.sh to refresh the hashed lock file.
+PySide6-Essentials==6.12.0
+pyinstaller==6.22.3

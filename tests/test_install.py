@@ -49,3 +49,16 @@ def test_hostile_settings_are_rejected(tmp_path: Path) -> None:
 
 def test_missing_settings_file_means_defaults(tmp_path: Path) -> None:
     assert not read_settings_file(tmp_path / "nope.lua").data
+
+
+def test_lists_installed_plugins_only(pocketbook: Path) -> None:
+    plugins = pocketbook / "applications" / "koreader" / "plugins"
+    (plugins / "pbfixes.koplugin").mkdir(parents=True)
+    (plugins / "hotkeys.koplugin").mkdir()
+    (plugins / "stray.koplugin").write_text("not a folder")
+    (plugins / "notes").mkdir()
+    assert find_install(pocketbook).plugins() == ("hotkeys", "pbfixes")
+
+
+def test_no_plugins_folder(pocketbook: Path) -> None:
+    assert not find_install(pocketbook).plugins()

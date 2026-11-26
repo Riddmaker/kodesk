@@ -28,6 +28,10 @@ DEFAULT_HEADER_FONT_SIZE = 20  # readercoptlistener.lua CRE_HEADER_DEFAULT_SIZE 
 DEFAULT_FOOTER_HEIGHT = 14  # defaults.lua DMINIBAR_CONTAINER_HEIGHT
 DEFAULT_FOOTER_PADDING = 1  # readerfooter.lua container_bottom_padding
 DEFAULT_FONT_FACE = "Noto Serif"  # cre_font fallback shipped in koreader/fonts/noto
+# creoptions.lua nightmode_images default_value = 1. The name reads backwards: 1 makes crengine
+# pre-invert pictures (credocument.lua drawCurrentView), so after night mode inverts the whole
+# screen they show in their original colours; 0 leaves them as negatives like the text.
+DEFAULT_NIGHTMODE_IMAGES = 1
 HEADER_MARGIN = 4  # crengine lvdocview.cpp #define HEADER_MARGIN
 FONT_SIZES = (12, 16, 20, 22, 24, 26, 28, 30, 34, 38, 44)  # DCREREADER_CONFIG_FONT_SIZES
 
@@ -95,6 +99,7 @@ class BookLayout:
     footer: Box | None  # KOReader status bar (mini bar)
     text: Box
     night_mode: bool
+    night_pictures_original: bool  # copt_nightmode_images == 1, see DEFAULT_NIGHTMODE_IMAGES
 
 
 def _header(settings: LuaTable, width: int) -> tuple[Box | None, int, tuple[str, ...]]:
@@ -163,4 +168,8 @@ def book_layout(device: DeviceModel, settings: LuaTable) -> BookLayout:
         footer=footer,
         text=text,
         night_mode=settings.get("night_mode") is True,
+        night_pictures_original=int(
+            _number(settings, "copt_nightmode_images", DEFAULT_NIGHTMODE_IMAGES)
+        )
+        == 1,
     )

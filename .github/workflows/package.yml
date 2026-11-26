@@ -40,7 +40,7 @@ jobs:
           python-version: '3.13'
       - name: Bundle with PyInstaller
         run: |
-          python -m pip install -r data/packaging/requirements-bundle.txt
+          python -m pip install --require-hashes -r data/packaging/requirements-bundle.txt
           pyinstaller --noconfirm data/packaging/kodesk.spec
       - name: Start check (window opens and quits)
         shell: pwsh
@@ -71,7 +71,7 @@ jobs:
           python-version: '3.13'
       - name: Bundle with PyInstaller
         run: |
-          python -m pip install -r data/packaging/requirements-bundle.txt
+          python -m pip install --require-hashes -r data/packaging/requirements-bundle.txt
           pyinstaller --noconfirm data/packaging/kodesk.spec
       - name: Start check (window opens and quits)
         env:
@@ -130,8 +130,8 @@ jobs:
           python-version: '3.13'
       - name: sdist and wheel
         run: |
-          python -m pip install build
-          python -m build --outdir dist
+          python -m pip install --require-hashes -r data/packaging/requirements-release.txt
+          python -m build --no-isolation --outdir dist
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: bundles

@@ -7,6 +7,7 @@ write").
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QMessageBox,
     QPushButton,
     QSlider,
     QSplitter,
@@ -35,6 +37,7 @@ from kodesk.core.devices import Control, DeviceModel, Face
 from kodesk.core.layout import (
     DEFAULT_B_MARGIN,
     DEFAULT_H_MARGINS,
+    DEFAULT_NIGHTMODE_IMAGES,
     DEFAULT_T_MARGIN,
     book_layout,
     scale_by_size,
@@ -74,6 +77,7 @@ class ReaderContext:
     library_entries: tuple[str, ...] = ()
     sleep_image: Path | None = None
     source_label: str = "demo (no reader connected)"
+    plugins: tuple[str, ...] = ()  # installed plugin names, e.g. "pbfixes"
 
 
 def _segmented(labels: list[str], parent: QWidget) -> tuple[QWidget, QButtonGroup]:
@@ -95,6 +99,7 @@ def _segmented(labels: list[str], parent: QWidget) -> tuple[QWidget, QButtonGrou
 
 
 INVERT_KEY: KeyPath = ("input_invert_page_turn_keys",)
+NIGHT_PICTURES_KEY: KeyPath = ("copt_nightmode_images",)
 PAGE_KEYS = ("LPgFwd", "LPgBack")
 
 
@@ -110,7 +115,26 @@ class SliderSpec:
     default: int  # KOReader's default, shown while the reader has no value
 
 
-def key_description(control: Control) -> str:
+@dataclass(frozen=True)
+class KeyUnlock:
+    """A plugin that makes a locked hardware key configurable, and the setting it reads."""
+
+    plugin: str  # plugins/<plugin>.koplugin
+    label: str
+    path: KeyPath
+    default: bool  # the plugin's value while the key is absent
+
+
+# pbfixes.koplugin 0.4.1 (github.com/glaucon1984/pbfixes.koplugin, main.lua):
+# HOME_SETTING = "pbfixes_home_back", read with G_reader_settings:nilOrTrue (absent = on).
+KEY_UNLOCKS = {
+    "Home": KeyUnlock(
+        "pbfixes", "Home button acts as Back (pbfixes plugin)", ("pbfixes_home_back",), True
+    ),
+}
+
+
+def key_description(control: Control, plugins: tuple[str, ...] = ()) -> str:
     """What KOReader does with a hardware control on this device, and what can be changed."""
     if control.koreader_key in PAGE_KEYS:
         return (
@@ -118,14 +142,24 @@ def key_description(control: Control) -> str:
             "assigned to them in KOReader on this device."
         )
     if control.koreader_key == "Home":
+        if "pbfixes" in plugins:
+            return (
+                "In KOReader: opens the library (file browser). <b>Unlocked</b> by the "
+                "pbfixes plugin installed on your reader: with the option on, Home acts as "
+                "Back instead (closes menus, goes up a folder)."
+            )
         return (
-            "In KOReader: opens the library (file browser). Fixed in KOReader on "
-            "this device: the Hotkeys plugin only works on readers with a keyboard."
+            "In KOReader: opens the library (file browser). <b>Locked:</b> KOReader has no "
+            "setting for this button on PocketBook (its Hotkeys plugin needs a keyboard). "
+            "The plugin <i>pbfixes</i> can make Home act as Back; once it is installed on "
+            "the reader, kodesk unlocks this button here. The reader's own settings must "
+            "leave a single press of Home to KOReader."
         )
     if control.koreader_key == "Menu":
         return (
-            "In KOReader: opens and closes the main menu. Fixed in KOReader on this "
-            "device. Holding it powers the reader off (firmware)."
+            "In KOReader: opens and closes the main menu. <b>Locked:</b> no KOReader setting "
+            "or known plugin changes it on PocketBook. Holding it powers the reader off "
+            "(firmware)."
         )
     return "KOReader does not see this control."
 
@@ -145,16 +179,61 @@ class KeyPanel(QGroupBox):
         self.invert.setObjectName("invert-page-turn")
         self.invert.setVisible(False)
         layout.addWidget(self.invert)
+        self.unlock = QCheckBox(self)  # the option a plugin adds to a locked key
+        self.unlock.setObjectName("key-unlock")
+        self.unlock.setVisible(False)
+        layout.addWidget(self.unlock)
+        self.current_unlock: KeyUnlock | None = None
 
-    def show_control(self, control: Control) -> None:
-        """Describe one control; the swap option only appears for the page-turn keys."""
+    def show_control(
+        self,
+        control: Control,
+        plugins: tuple[str, ...] = (),
+        value_of: Callable[[KeyPath], LuaValue | None] = lambda _path: None,
+    ) -> None:
+        """Describe one control; options appear only where KOReader or a plugin offers one."""
         self.setTitle(f"Button: {control.label}")
         self.info.setText(
             f"<b>Reader firmware:</b> {control.firmware_role}<br>"
             f"<b>KOReader key:</b> {control.koreader_key or '—'}<br>"
-            f"{key_description(control)}"
+            f"{key_description(control, plugins)}"
         )
         self.invert.setVisible(control.koreader_key in PAGE_KEYS)
+        unlock = KEY_UNLOCKS.get(control.koreader_key or "")
+        self.current_unlock = unlock if unlock and unlock.plugin in plugins else None
+        self.unlock.setVisible(self.current_unlock is not None)
+        if self.current_unlock is not None:
+            value = value_of(self.current_unlock.path)
+            self.unlock.blockSignals(True)  # showing the state is not a change
+            self.unlock.setText(self.current_unlock.label)
+            self.unlock.setChecked(self.current_unlock.default if value is None else value is True)
+            self.unlock.blockSignals(False)
+
+
+# Writes the edited settings to the reader; returns a short report for the status line.
+SettingsWriter = Callable[[SettingsDocument, SettingsDocument], str]
+
+
+class ChangesBox(QGroupBox):
+    """The pending changes and the button that writes them (only with a connected reader)."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__("Changed settings (not written yet)", parent)
+        self.writer: SettingsWriter | None = None
+        self.list = QListWidget(self)
+        self.list.setObjectName("changes")
+        self.write_button = QPushButton("Write to reader…", self)
+        self.write_button.setObjectName("write")
+        self.write_button.setEnabled(False)
+        self.write_button.setToolTip(
+            "Writes only the settings listed above, after a snapshot (Reader → Snapshots…)."
+        )
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.list)
+        layout.addWidget(self.write_button)
+
+    def lines(self) -> list[str]:
+        return [self.list.item(i).text() for i in range(self.list.count())]
 
 
 class TuningGarage(QWidget):
@@ -187,8 +266,8 @@ class TuningGarage(QWidget):
         self.key_panel = KeyPanel(self)
         self.key_panel.invert.setChecked(self._value(INVERT_KEY) is True)
         self.key_panel.invert.toggled.connect(self._set_invert)
-        self.changes = QListWidget(self)
-        self.changes.setObjectName("changes")
+        self.key_panel.unlock.toggled.connect(self._set_unlocked_option)
+        self.changes_box = ChangesBox(self)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self._build_center(view_switch))
@@ -228,20 +307,12 @@ class TuningGarage(QWidget):
         )
         self.panels.addWidget(self._library_panel())
         self.panels.addWidget(self._sleep_panel())
-        write_button = QPushButton("Write to reader", self)
-        write_button.setEnabled(False)
-        write_button.setToolTip(
-            "Writing comes with snapshot and one-click restore (B-04). This spike only previews."
-        )
-        changes_box = QGroupBox("Changed settings (not written yet)", self)
-        changes_layout = QVBoxLayout(changes_box)
-        changes_layout.addWidget(self.changes)
-        changes_layout.addWidget(write_button)
+        self.changes_box.write_button.clicked.connect(self.write_changes)
         right = QWidget(self)
         right_layout = QVBoxLayout(right)
         right_layout.addWidget(self.panels, 1)
         right_layout.addWidget(self.key_panel)
-        right_layout.addWidget(changes_box)
+        right_layout.addWidget(self.changes_box)
         return right
 
     # ----------------------------------------------------------------- settings model
@@ -262,13 +333,65 @@ class TuningGarage(QWidget):
         self.refresh()
         self.settingsChanged.emit()
 
+    def _set_or_default(self, path: KeyPath, value: LuaValue, default: LuaValue) -> None:
+        """Like _set, but going back to KOReader's default on a key the reader never had
+        leaves the key unset: no stray line in the diff (only visibly changed keys)."""
+        unset = self.original.get(path) is None and value == default
+        self._set(path, None if unset else value)
+
     def _set_invert(self, on: bool) -> None:
-        # Unticking restores "not set" when the reader never had the key, so no stray `false`.
-        had_key = self.original.get(INVERT_KEY) is not None
-        self._set(INVERT_KEY, True if on else (False if had_key else None))
+        self._set_or_default(INVERT_KEY, on, False)
+
+    def _set_unlocked_option(self, on: bool) -> None:
+        unlock = self.key_panel.current_unlock
+        if unlock is not None:
+            self._set_or_default(unlock.path, on, unlock.default)
 
     def changed(self) -> list[KeyPath]:
+        """Key paths whose value differs from the reader's own settings."""
         return changed_paths(self.original.data, self.edited.data)
+
+    def set_writer(self, writer: SettingsWriter | None) -> None:
+        """Allow writing (a connected reader); without a writer the garage only previews."""
+        self.changes_box.writer = writer
+        self.refresh()
+
+    def confirm_write(self, count: int) -> bool:
+        """Preview before write: the changes, the KOReader-closed hint, a named action."""
+        box = QMessageBox(self)
+        box.setObjectName("write-preview")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Write to your reader")
+        box.setText(
+            f"Write {count} changed setting{'s' if count != 1 else ''} to your reader? "
+            "kodesk takes a snapshot first; every other setting stays exactly as it is."
+        )
+        box.setInformativeText(
+            "Close KOReader on the reader first: it saves its own settings when it exits and "
+            "would overwrite these changes."
+        )
+        box.setDetailedText("\n".join(self.changes_box.lines()))
+        action = box.addButton(
+            f"Write {count} setting{'s' if count != 1 else ''}", QMessageBox.ButtonRole.AcceptRole
+        )
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is action
+
+    def write_changes(self) -> None:
+        """Write the pending changes through the writer; on success they become the baseline."""
+        count = len(self.changed())
+        writer = self.changes_box.writer
+        if writer is None or not count or not self.confirm_write(count):
+            return
+        try:
+            report = writer(self.original, self.edited)
+        except Exception as error:  # pylint: disable=broad-exception-caught  # shown, not raised
+            QMessageBox.warning(self, "Write to your reader", str(error))
+            return
+        self.original = self.edited
+        self.refresh()
+        self.status.setText(report)
 
     # ----------------------------------------------------------------- panels
 
@@ -329,6 +452,21 @@ class TuningGarage(QWidget):
         night.setChecked(layout.night_mode)
         night.toggled.connect(lambda on: self._set(("night_mode",), on))
         form.addRow(night)
+        pictures = QCheckBox("Pictures in original colours", self)
+        pictures.setObjectName("night-pictures")
+        pictures.setToolTip(
+            "In night mode, show pictures as they are instead of as negatives "
+            "(KOReader: Invert Images, EPUB). Only matters while night mode is on."
+        )
+        pictures.setChecked(layout.night_pictures_original)
+        pictures.setEnabled(layout.night_mode)
+        night.toggled.connect(pictures.setEnabled)
+        pictures.toggled.connect(
+            lambda on: self._set_or_default(
+                NIGHT_PICTURES_KEY, 1 if on else 0, DEFAULT_NIGHTMODE_IMAGES
+            )
+        )
+        form.addRow("", pictures)  # field column: indented under night mode
         header = QCheckBox("Alternative status bar at the top", self)
         header.setObjectName("alt-status-bar")
         header.setChecked(layout.header is not None)
@@ -385,11 +523,23 @@ class TuningGarage(QWidget):
             self.page = max(0, min(self.page + step, self._book().page_count - 1))
         elif step and self.view is View.LIBRARY:
             self.library_page = max(0, self.library_page + step)
+        elif control_id == "home" and self._home_is_back():
+            if self.view is View.MENU:
+                self.set_view(View.BOOK)
+            self.status.setText("Home acts as Back (pbfixes plugin).")
+            return
         elif control_id == "home":
             self.set_view(View.LIBRARY)
         elif control_id == "menu":
             self.set_view(View.BOOK if self.view is View.MENU else View.MENU)
         self.refresh()
+
+    def _home_is_back(self) -> bool:
+        unlock = KEY_UNLOCKS["Home"]
+        if unlock.plugin not in self.context.plugins:
+            return False
+        value = self._value(unlock.path)
+        return unlock.default if value is None else value is True
 
     def long_press_key(self, control_id: str) -> None:
         """Simulate holding a key (about 2 s); only Menu | On/Off reacts, in the firmware."""
@@ -404,7 +554,7 @@ class TuningGarage(QWidget):
         """Highlight a button on the drawing and show what it does and what can be changed."""
         self.device_view.select_key(control_id)
         control = next(c for c in self.context.device.controls if c.id == control_id)
-        self.key_panel.show_control(control)
+        self.key_panel.show_control(control, self.context.plugins, self._value)
 
     # ----------------------------------------------------------------- views
 
@@ -446,11 +596,13 @@ class TuningGarage(QWidget):
     def refresh(self) -> None:
         """Redraw the screen and the list of pending changes."""
         self.device_view.set_screen(self.screen_image())
-        self.changes.clear()
+        box = self.changes_box
+        box.list.clear()
+        box.write_button.setEnabled(box.writer is not None and bool(self.changed()))
         for path in self.changed():
             old, new = self.original.get(path), self.edited.get(path)
             name = ".".join(str(part) for part in path)
-            self.changes.addItem(f"{name}: {_short(old)} → {_short(new)}")
+            box.list.addItem(f"{name}: {_short(old)} → {_short(new)}")
         if self.view is View.BOOK:
             book = self._book()
             self.status.setText(
