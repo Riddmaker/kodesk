@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from kodesk import APP_ID, APP_NAME, __version__
+from kodesk.core import healthcheck
 from kodesk.core.devices import DEVICES
 from kodesk.core.install import InstallError, KOReaderInstall, find_install
 from kodesk.core.luadump import SettingsDocument
@@ -143,6 +144,7 @@ class MainWindow(QMainWindow):
             self.garage.set_writer(
                 lambda before, after: self._write_settings(install, before, after)
             )
+            QTimer.singleShot(0, self.check_health)
 
     @staticmethod
     def _write_settings(
@@ -151,6 +153,52 @@ class MainWindow(QMainWindow):
         snapshot = write_settings(snapshot_store(install), install.root, before, after)
         taken = snapshot.created.astimezone().strftime("%H:%M")
         return f"Written to your reader. Snapshot from {taken} kept (Reader → Snapshots…)."
+
+    def check_health(self) -> QMessageBox | None:
+        """After a write: did KOReader load every plugin and patch since? Offer the way back."""
+        if self.install is None:
+            return None
+        store = snapshot_store(self.install)
+        pending = healthcheck.load_pending(store.base)
+        if pending is None:
+            return None
+        try:
+            report = healthcheck.check(self.install.root, pending)
+        except OSError:
+            return None  # reader gone; the check stays pending
+        if not report.started:
+            return None
+        healthcheck.clear_pending(store.base)
+        if not report.failures:
+            return None
+        box = QMessageBox(self)
+        box.setObjectName("health")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(APP_NAME)
+        box.setText(
+            "Since the last change, KOReader could not load:\n"
+            + "\n".join(f"• {f.kind.capitalize()} {f.name}" for f in report.failures)
+        )
+        box.setInformativeText(
+            "The change may have caused this. The snapshot taken before it brings your reader "
+            "back to how it was."
+        )
+        box.setDetailedText("\n\n".join(f"{f.name}: {f.message}" for f in report.failures))
+        restore = box.addButton("Restore snapshot…", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Keep as is", QMessageBox.ButtonRole.RejectRole)
+        snapshot_id = pending.snapshot_id
+        box.finished.connect(
+            lambda _result: box.clickedButton() is restore and self.offer_restore(snapshot_id)
+        )
+        box.open()
+        return box
+
+    def offer_restore(self, snapshot_id: str) -> SnapshotsDialog | None:
+        """The Snapshots window with ``snapshot_id`` selected, then its restore preview."""
+        dialog = self.show_snapshots()
+        if dialog is not None and dialog.select(snapshot_id):
+            dialog.restore_selected()
+        return dialog
 
     def choose_reader(self) -> None:
         """Let the user pick a reader mount or KOReader folder."""

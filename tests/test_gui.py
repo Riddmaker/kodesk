@@ -10,9 +10,10 @@ from PySide6.QtCore import QStandardPaths, Qt
 from PySide6.QtWidgets import QCheckBox, QListWidget, QMessageBox, QSlider
 from pytestqt.qtbot import QtBot
 
+from kodesk.core import healthcheck
 from kodesk.core.devices import Face
 from kodesk.core.install import find_install
-from kodesk.core.snapshot import RestorePlan, SnapshotStore
+from kodesk.core.snapshot import RestorePlan, Snapshot, SnapshotStore
 from kodesk.ui.app import MainWindow, demo_context, main, reader_context, snapshot_store
 from kodesk.ui.garage import TuningGarage, View
 from kodesk.ui.snapshots import SnapshotsDialog, human_size, plan_text
@@ -290,3 +291,50 @@ def test_garage_without_a_writer_cannot_write(garage: TuningGarage) -> None:
     assert slider is not None
     slider.setValue(slider.value() + 2)
     assert garage.changes_box.writer is None and not garage.changes_box.write_button.isEnabled()
+
+
+def _write_font_size(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    slider = window.garage.findChild(QSlider, "font-size")
+    assert slider is not None
+    slider.setValue(26)
+    monkeypatch.setattr(TuningGarage, "confirm_write", lambda _self, _count: True)
+    window.garage.write_changes()
+
+
+def test_health_check_waits_until_koreader_ran(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, koreader = _real_reader(tmp_path, monkeypatch)
+    qtbot.addWidget(window)
+    _write_font_size(window, monkeypatch)
+    assert window.check_health() is None  # KOReader not started since: stays pending
+    (koreader / "crash.log").write_text("11/26/26-14:00:00 INFO  initializing for device X\n")
+    assert window.check_health() is None  # clean start: nothing to say, check done
+    assert window.install is not None
+    assert healthcheck.load_pending(snapshot_store(window.install).base) is None
+
+
+def test_failed_plugin_after_a_write_offers_the_snapshot(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, koreader = _real_reader(tmp_path, monkeypatch)
+    qtbot.addWidget(window)
+    _write_font_size(window, monkeypatch)
+    (koreader / "crash.log").write_text(
+        "11/26/26-14:00:01 ERROR Failed to initialize projecttitle plugin: boom\n"
+    )
+    box = window.check_health()
+    assert box is not None and "Plugin projecttitle" in box.text()
+    assert "projecttitle: boom" in box.detailedText()
+    previews: list[str] = []
+
+    def confirm(_self: SnapshotsDialog, snapshot: Snapshot, _plan: RestorePlan) -> bool:
+        previews.append(snapshot.id)
+        return True
+
+    monkeypatch.setattr(SnapshotsDialog, "confirm", confirm)
+    monkeypatch.setattr(QMessageBox, "information", lambda *_args: None)
+    restore = next(b for b in box.buttons() if b.text() == "Restore snapshot…")
+    qtbot.mouseClick(restore, Qt.MouseButton.LeftButton)
+    assert len(previews) == 1  # preview before write, then restored
+    assert '["copt_font_size"] = 22,' in (koreader / "settings.reader.lua").read_text()

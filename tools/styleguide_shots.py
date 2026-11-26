@@ -16,6 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QStandardPaths, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QSlider, QToolButton
 
+from kodesk.core import healthcheck
 from kodesk.core.install import find_install
 from kodesk.ui.app import MainWindow, reader_context
 from kodesk.ui.garage import View
@@ -68,19 +69,34 @@ def main(argv: list[str]) -> int:
                 shot("garage-bottom-edge")
         garage.set_view(View.SLEEP)
         shot("garage-sleep")
-        dialog = window.show_snapshots()
-        assert dialog is not None
-        dialog.take()
-        app.processEvents()
-        dialog.grab().save(str(out / f"snapshots{suffix}.png"))
-        test_home = dialog.store.base.parents[3]  # ~/.qttest/share/<app>/snapshots/<id>
-        shutil.rmtree(dialog.store.base.parents[1])
-        for folder in (test_home / "share", test_home):
-            if folder.is_dir() and not any(folder.iterdir()):
-                folder.rmdir()
-        dialog.close()
+        snapshot_shots(app, window, out, suffix)
         window.close()
     return 0
+
+
+def snapshot_shots(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:
+    """The Snapshots window, then the health-check warning after a plugin failed to load."""
+    dialog = window.show_snapshots()
+    assert dialog is not None
+    dialog.take()
+    app.processEvents()
+    dialog.grab().save(str(out / f"snapshots{suffix}.png"))
+    healthcheck.remember(dialog.store.base, dialog.koreader_dir, dialog.store.snapshots()[0].id)
+    (dialog.koreader_dir / healthcheck.CRASH_LOG).write_text(
+        "11/26/26-14:00:01 WARN  Error when loading plugins/projecttitle.koplugin/main.lua: "
+        "plugins/projecttitle.koplugin/main.lua:40: attempt to index a nil value\n"
+    )
+    box = window.check_health()
+    assert box is not None
+    app.processEvents()
+    box.grab().save(str(out / f"health-check{suffix}.png"))
+    box.reject()
+    test_home = dialog.store.base.parents[3]  # ~/.qttest/share/<app>/snapshots/<id>
+    shutil.rmtree(dialog.store.base.parents[1])
+    for folder in (test_home / "share", test_home):
+        if folder.is_dir() and not any(folder.iterdir()):
+            folder.rmdir()
+    dialog.close()
 
 
 if __name__ == "__main__":

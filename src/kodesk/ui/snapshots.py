@@ -120,6 +120,14 @@ class SnapshotsDialog(QDialog):
             QMessageBox.warning(self, self.windowTitle(), f"No snapshot taken: {error}")
         self.refresh()
 
+    def select(self, snapshot_id: str) -> bool:
+        """Select the snapshot with this id; False if it is no longer kept."""
+        for row in range(self.list.count()):
+            if self.list.item(row).data(Qt.ItemDataRole.UserRole) == snapshot_id:
+                self.list.setCurrentRow(row)
+                return True
+        return False
+
     def selected(self) -> Snapshot | None:
         """The snapshot selected in the list, if any."""
         item = self.list.currentItem()

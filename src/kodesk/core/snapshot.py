@@ -26,11 +26,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
+from kodesk.core import healthcheck
 from kodesk.core.inventory import Origin, list_plugins
 from kodesk.core.luadump import SettingsDocument
 
 KEEP = 5
 EXCLUDED_DIRS = frozenset({"cache"})  # KOReader rebuilds it; 16 MB on the reference reader
+# The log is not setup, and rolling it back would erase what the health check (B-10) reads.
+EXCLUDED_FILES = frozenset({healthcheck.CRASH_LOG, healthcheck.CRASH_LOG + ".new"})
 PROTECTED_FILES = frozenset(
     {"settings.reader.lua", "settings.reader.lua.old", "history.lua", "defaults.custom.lua"}
 )
@@ -141,7 +144,7 @@ def walk(koreader_dir: Path) -> list[str]:
             if (here / name).is_symlink():
                 raise SnapshotError(f"symbolic link in the KOReader folder: {here / name}")
         for name in files:
-            if name.endswith(TEMP_SUFFIX):
+            if name.endswith(TEMP_SUFFIX) or (here == koreader_dir and name in EXCLUDED_FILES):
                 continue
             found.append((here / name).relative_to(koreader_dir).as_posix())
     return sorted(found)
@@ -176,7 +179,7 @@ class SnapshotStore:
     # -- taking ---------------------------------------------------------------------------
 
     def take(self, koreader_dir: Path) -> Snapshot:
-        """Copy every file (except cache/) into the store and write the manifest last."""
+        """Copy every file (not cache/, not the log) to the store; the manifest is written last."""
         paths = walk(koreader_dir)
         self._check_free_space(koreader_dir, paths)
         self.blobs.mkdir(parents=True, exist_ok=True)
@@ -351,7 +354,8 @@ def guarded_write(
     """Snapshot, run ``write``, verify the protected files; restore on any failure.
 
     ``allowed`` names the protected files this write is meant to change (e.g. the Tuning-Garage
-    and ``settings.reader.lua``); every other protected file must stay byte-identical.
+    and ``settings.reader.lua``); every other protected file must stay byte-identical. After a
+    good write the next connect checks KOReader's log (:mod:`kodesk.core.healthcheck`).
     """
     third_party = third_party_plugins(koreader_dir)
     snapshot = store.take(koreader_dir)
@@ -366,4 +370,5 @@ def guarded_write(
         raise WriteRejectedError(
             "the write changed protected files, so it was undone: " + ", ".join(changed), changed
         )
+    healthcheck.remember(store.base, koreader_dir, snapshot.id)  # checked on the next connect
     return snapshot
