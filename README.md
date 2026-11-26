@@ -25,6 +25,7 @@ Every key drawn on the reader is a real button. Click it, or reach it with Tab a
 nix develop -c tools/check.sh                # ruff format/check, mypy, pylint, pytest (as in CI)
 nix develop -c tools/gui-smoke.sh /tmp/shots # headless sway, keyboard-only run, screenshots
 nix build && nix develop -c tools/gui-smoke.sh /tmp/shots result/bin/kodesk
+tools/lock-requirements.sh                   # refresh the hashed pip locks after editing data/packaging/*.in
 ```
 
 The tests and the smoke run use fake reader trees (`tests/conftest.py`). They never touch a connected reader.

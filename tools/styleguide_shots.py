@@ -45,6 +45,8 @@ def main(argv: list[str]) -> int:
         assert slider is not None
         slider.setValue(slider.value() + 4)
         shot("garage-key-and-diff")
+        garage.select_key("home")
+        shot("garage-home-locked")
         for side in ("Bottom edge", "Front"):  # click the switch like a user would
             button = garage.findChild(QToolButton, f"seg-{side}")
             assert button is not None
