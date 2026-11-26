@@ -75,6 +75,7 @@ def main(argv: list[str]) -> int:
         shot("garage-sleep")
         snapshot_shots(app, window, out, suffix)
         store_shot(app, window, out, suffix)
+        installed_shot(app, window, out, suffix)
         window.close()
     return 0
 
@@ -129,6 +130,23 @@ Copy `readingclock.koplugin` to `koreader/plugins/` and restart KOReader.
 - **Tap** the clock to hide it
 - See the [settings](https://github.com/bob/readingclock.koplugin#settings)
 """
+
+
+def installed_shot(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:
+    """The Installed tab with a plugin and two patches the user added."""
+    install = window.installed.install
+    assert install is not None
+    plugin = install.root / "plugins" / "projecttitle.koplugin"
+    plugin.mkdir(parents=True, exist_ok=True)
+    (plugin / "main.lua").write_text("-- fake\n")
+    patches = install.root / "patches"
+    patches.mkdir(exist_ok=True)
+    (patches / "2-reader-footer-tweak.lua").write_text("-- fake\n")
+    (patches / "footer-old.lua").write_text("-- fake\n")
+    window.installed.set_install(install)
+    window.tabs.setCurrentWidget(window.installed)
+    app.processEvents()
+    window.grab().save(str(out / f"installed{suffix}.png"))
 
 
 if __name__ == "__main__":

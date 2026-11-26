@@ -125,6 +125,9 @@ shot 08-store-offline-catalogue
 press clock -k Return
 sleep 1
 shot 09-store-search-selected
+press -M alt -k i -m alt
+sleep 0.5
+shot 10-installed
 press -M ctrl -k q -m ctrl
 exited() { ! kill -0 "$app_pid"; }
 if wait_for 5 exited; then app_pid=""; echo "app quit via Ctrl+Q"; else echo "app did not quit" >&2; exit 1; fi

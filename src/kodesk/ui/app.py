@@ -23,11 +23,11 @@ from kodesk import APP_ID, APP_NAME, __version__
 from kodesk.core import catalogue, healthcheck
 from kodesk.core.devices import DEVICES
 from kodesk.core.install import InstallError, KOReaderInstall, find_install
-from kodesk.core.inventory import list_patches
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.settings_write import write_settings
 from kodesk.core.snapshot import SnapshotStore, device_id
 from kodesk.ui.garage import ReaderContext, TuningGarage
+from kodesk.ui.installed import InstalledPage
 from kodesk.ui.screen import load_device_fonts
 from kodesk.ui.snapshots import SnapshotsDialog
 from kodesk.ui.store import StorePage
@@ -119,7 +119,7 @@ def detect_reader() -> KOReaderInstall | None:
 
 
 class MainWindow(QMainWindow):
-    """Main window: menu bar, the Tuning-Garage and Store tabs, the reader in the status bar."""
+    """Main window: menu bar, the Tuning-Garage, Installed and Store tabs, the reader below."""
 
     def __init__(
         self,
@@ -132,6 +132,8 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
+        self.installed = InstalledPage(self)
+        self.tabs.addTab(self.installed, "&Installed")
         self.store = store_page(offline, self)
         self.tabs.addTab(self.store, "&Store")
         self.tabs.currentChanged.connect(self._tab_changed)
@@ -169,9 +171,11 @@ class MainWindow(QMainWindow):
             old.deleteLater()
         self.tabs.insertTab(0, self.garage, "Tuning-&Garage")
         self.tabs.setCurrentIndex(0)
-        plugins = frozenset(install.plugins()) if install else frozenset()
-        patches = frozenset(p.name for p in list_patches(install.root)) if install else frozenset()
-        self.store.set_installed(plugins, patches)
+        self.installed.set_install(install)
+        self.store.set_installed(
+            frozenset(install.plugins()) if install else frozenset(),
+            frozenset(p.name for p in self.installed.patches),
+        )
         self.statusBar().showMessage(context.source_label)
         if install is not None:
             self.garage.set_writer(

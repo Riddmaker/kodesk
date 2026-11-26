@@ -16,7 +16,7 @@ from kodesk.core.snapshot import SnapshotStore
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-OWNER_LIKE_SETTINGS = {
+OWNER_LIKE_SETTINGS: dict[object, object] = {
     "copt_font_size": 22,
     "copt_h_page_margins": {1: 10, 2: 10},
     "copt_t_page_margin": 10,
