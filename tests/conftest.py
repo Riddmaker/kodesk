@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import os
 import zipfile
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from kodesk.core.luadump import dump_file
+from kodesk.core.snapshot import SnapshotStore
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -124,3 +127,20 @@ def make_reader(root: Path, platform: str, settings: dict[object, object] | None
     (root / "Books" / "Alice.epub").write_bytes(b"PK")
     (sdr / "metadata.epub.lua").write_text('return {\n    ["percent_finished"] = 0.42,\n}\n')
     return koreader
+
+
+def _clock() -> Callable[[], datetime]:
+    moments = iter(
+        datetime(2026, 11, 26, 13, 0, tzinfo=UTC) + timedelta(minutes=i) for i in range(99)
+    )
+    return lambda: next(moments)
+
+
+@pytest.fixture
+def reader(tmp_path: Path) -> Path:
+    return make_reader(tmp_path / "PB634K3", "pocketbook")
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> SnapshotStore:
+    return SnapshotStore(tmp_path / "data" / "snapshots" / "PBVerseProColor-PB634K3", _clock())
