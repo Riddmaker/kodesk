@@ -18,8 +18,10 @@ from PySide6.QtGui import (
     QFontDatabase,
     QFontMetricsF,
     QImage,
+    QLinearGradient,
     QPainter,
     QPen,
+    QPolygonF,
     QTextLayout,
     QTextOption,
 )
@@ -28,6 +30,7 @@ from kodesk.core.layout import BookLayout
 
 TEXT_INDENT_EM = 1.2  # koreader/data/epub.css: p { text-indent: 1.2em; }
 NOTO_SANS_HEIGHT_EM = 1.362
+PICTURE_AFTER_PARAGRAPH = 1  # the sample page shows a picture after the first paragraph
 
 
 def sample_book() -> tuple[str, str, str, list[str]]:
@@ -58,11 +61,47 @@ def _font(family: str, pixel_size: int, fallback: QFont.StyleHint) -> QFont:
     return font
 
 
+def sample_picture(width: int, height: int) -> QImage:
+    """A small colour landscape standing in for a book illustration (drawn, nothing shipped)."""
+    image = QImage(max(1, width), max(1, height), QImage.Format.Format_RGB32)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    sky = QLinearGradient(0, 0, 0, height)
+    sky.setColorAt(0, QColor("#4a90d9"))
+    sky.setColorAt(1, QColor("#cfe8ff"))
+    painter.fillRect(0, 0, width, height, sky)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#f5c518"))
+    painter.drawEllipse(QPointF(width * 0.78, height * 0.25), height * 0.12, height * 0.12)
+    for color, top, bottom in (("#5a9e4b", 0.55, 1.0), ("#2f6b2f", 0.7, 1.0)):
+        painter.setBrush(QColor(color))
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(0, height * bottom),
+                    QPointF(0, height * (top + 0.1)),
+                    QPointF(width * 0.35, height * top),
+                    QPointF(width * 0.7, height * (top + 0.12)),
+                    QPointF(width, height * (top + 0.02)),
+                    QPointF(width, height * bottom),
+                ]
+            )
+        )
+    painter.end()
+    return image
+
+
 @dataclass
 class _Line:
     layout: QTextLayout
     index: int
     height: float
+
+
+@dataclass
+class _Picture:
+    width: int
+    height: int
 
 
 class BookRenderer:
@@ -79,14 +118,20 @@ class BookRenderer:
         self._layouts: list[QTextLayout] = []
         self.pages = self._paginate(paragraphs)
 
-    def _paginate(self, paragraphs: list[str]) -> list[list[tuple[_Line, float]]]:
+    def _picture(self) -> _Picture:
+        width = round(self.layout.text.w * 0.8)
+        return _Picture(width, min(round(width * 0.6), self.layout.text.h // 2))
+
+    def _paginate(self, paragraphs: list[str]) -> list[list[tuple[_Line | _Picture, float]]]:
         width = self.layout.text.w
         indent = TEXT_INDENT_EM * self.layout.font_px
         option = QTextOption()
         option.setAlignment(Qt.AlignmentFlag.AlignJustify)
         option.setWrapMode(QTextOption.WrapMode.WordWrap)
-        lines: list[_Line] = []
-        for paragraph in paragraphs:
+        lines: list[_Line | _Picture] = []
+        for number, paragraph in enumerate(paragraphs):
+            if number == PICTURE_AFTER_PARAGRAPH:
+                lines.append(self._picture())
             text_layout = QTextLayout(paragraph, self.font)
             text_layout.setTextOption(option)
             text_layout.beginLayout()
@@ -102,7 +147,7 @@ class BookRenderer:
                 first = False
             text_layout.endLayout()
             self._layouts.append(text_layout)
-        pages: list[list[tuple[_Line, float]]] = [[]]
+        pages: list[list[tuple[_Line | _Picture, float]]] = [[]]
         y = 0.0
         for entry in lines:
             if y + entry.height > self.layout.text.h and pages[-1]:
@@ -127,6 +172,9 @@ class BookRenderer:
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         painter.setPen(ink)
         for line, y in self.pages[page]:
+            if isinstance(line, _Picture):
+                self._paint_picture(painter, line, y)
+                continue
             text_line = line.layout.lineAt(line.index)
             # Baseline sits at ascent within the (possibly stretched) line box.
             extra = (line.height - QFontMetricsF(self.font).height()) / 2
@@ -136,6 +184,16 @@ class BookRenderer:
             self._paint_header(painter, ink, page, battery, clock)
         painter.end()
         return image
+
+    def _paint_picture(self, painter: QPainter, picture: _Picture, y: float) -> None:
+        """Pictures as they end up on screen: in night mode they are negatives unless
+        crengine pre-inverts them (copt_nightmode_images = 1, KOReader's default)."""
+        lay = self.layout
+        image = sample_picture(picture.width, picture.height)
+        if lay.night_mode and not lay.night_pictures_original:
+            image.invertPixels()
+        x = lay.text.x + (lay.text.w - picture.width) // 2
+        painter.drawImage(QPointF(x, lay.text.y + y), image)
 
     def _paint_header(
         self, painter: QPainter, ink: QColor, page: int, battery: int, clock: str

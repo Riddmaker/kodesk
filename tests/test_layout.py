@@ -42,3 +42,8 @@ def test_reclaim_height_and_footer_off() -> None:
     assert reclaim.margins_px[3] == scale_by_size(15, 1072, 1448)
     off = book_layout(VERSE, {"reader_footer_mode": 0})
     assert off.footer is None
+
+
+def test_night_pictures_keep_original_colours_by_default() -> None:
+    assert book_layout(VERSE, {}).night_pictures_original is True
+    assert book_layout(VERSE, {"copt_nightmode_images": 0}).night_pictures_original is False

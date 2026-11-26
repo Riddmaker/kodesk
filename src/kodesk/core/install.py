@@ -45,6 +45,19 @@ class KOReaderInstall:
     def read_settings(self) -> SettingsDocument:
         return read_settings_file(self.settings_path)
 
+    def plugins(self) -> tuple[str, ...]:
+        """Names of the installed plugins (``plugins/<name>.koplugin`` folders), sorted."""
+        plugins_dir = self.root / "plugins"
+        if not plugins_dir.is_dir():
+            return ()
+        return tuple(
+            sorted(
+                path.name.removesuffix(".koplugin")
+                for path in plugins_dir.iterdir()
+                if path.name.endswith(".koplugin") and path.is_dir()
+            )
+        )
+
 
 def read_settings_file(path: Path) -> SettingsDocument:
     """Parse a settings file; a missing file is an empty table, an oversized one an error."""

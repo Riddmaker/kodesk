@@ -67,6 +67,7 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
         font_families=tuple(load_device_fonts(install.fonts_dir)),
         library_entries=_library_entries(home_path),
         sleep_image=sleep if sleep.is_file() else None,
+        plugins=install.plugins(),
         source_label=f"KOReader {install.version or '?'} on {volume} (read-only)",
     )
 

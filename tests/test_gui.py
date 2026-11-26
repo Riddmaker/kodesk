@@ -14,6 +14,7 @@ from kodesk.core.devices import Face
 from kodesk.core.install import find_install
 from kodesk.ui.app import MainWindow, demo_context, main, reader_context
 from kodesk.ui.garage import TuningGarage, View
+from tests.conftest import make_pocketbook
 
 pytestmark = pytest.mark.gui
 
@@ -64,7 +65,57 @@ def test_home_and_menu_switch_views(qtbot: QtBot, garage: TuningGarage) -> None:
     assert current_view(garage) is View.BOOK
     click_key(qtbot, garage, "home")
     assert current_view(garage) is View.LIBRARY
-    assert "Fixed in KOReader" in garage.key_panel.info.text()
+    assert "Locked" in garage.key_panel.info.text()
+
+
+def test_home_and_menu_are_locked_without_a_plugin(garage: TuningGarage) -> None:
+    for key in ("home", "menu"):
+        garage.select_key(key)
+        assert "Locked" in garage.key_panel.info.text()
+        assert not garage.key_panel.unlock.isVisibleTo(garage)
+    garage.select_key("home")
+    assert "pbfixes" in garage.key_panel.info.text()
+
+
+def test_pbfixes_plugin_unlocks_home(qtbot: QtBot, tmp_path: Path) -> None:
+    reader = make_pocketbook(tmp_path / "PB634K3")
+    (reader / "applications/koreader/plugins/pbfixes.koplugin").mkdir(parents=True)
+    window = MainWindow(reader_context(find_install(reader)))
+    qtbot.addWidget(window)
+    window.show()
+    garage = window.garage
+    garage.select_key("home")
+    unlock = garage.key_panel.unlock
+    assert "Unlocked" in garage.key_panel.info.text()
+    assert unlock.isVisible() and unlock.isChecked()  # pbfixes: absent key = on
+    garage.press_key("menu")
+    garage.press_key("home")
+    assert current_view(garage) is View.BOOK  # Back closes the menu instead of the library
+    assert not garage.changed()  # showing the state writes nothing
+    unlock.setChecked(False)
+    assert garage.changed() == [("pbfixes_home_back",)]
+    assert garage.edited.get(("pbfixes_home_back",)) is False
+    garage.press_key("home")
+    assert current_view(garage) is View.LIBRARY  # option off: Home is Home again
+    unlock.setChecked(True)
+    assert not garage.changed()  # back to the plugin's default: key stays absent
+    garage.select_key("menu")
+    assert not unlock.isVisible()
+
+
+def test_night_pictures_option_follows_night_mode(garage: TuningGarage) -> None:
+    night = garage.findChild(QCheckBox, "night-mode")
+    pictures = garage.findChild(QCheckBox, "night-pictures")
+    assert night is not None and pictures is not None
+    assert night.isChecked() and pictures.isEnabled() and pictures.isChecked()
+    before = garage.screen_image()
+    pictures.setChecked(False)
+    assert garage.changed() == [("copt_nightmode_images",)]
+    assert garage.screen_image() != before  # the picture turns into a negative
+    pictures.setChecked(True)
+    assert not garage.changed()
+    night.setChecked(False)
+    assert not pictures.isEnabled()
 
 
 def test_long_press_menu_is_firmware_power(garage: TuningGarage) -> None:
@@ -83,7 +134,7 @@ def test_slider_changes_exactly_one_key(garage: TuningGarage) -> None:
     changes = garage.findChild(QListWidget, "changes")
     assert changes is not None and changes.item(0).text() == "copt_font_size: 22 → 26"
     slider.setValue(22)
-    assert garage.changed() == []
+    assert not garage.changed()
 
 
 def test_screen_is_rendered_at_device_pixels(garage: TuningGarage) -> None:
