@@ -8,10 +8,12 @@ once in the desktop session (e.g. Kvantum Catppuccin) to show that kodesk follow
 
 from __future__ import annotations
 
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
+from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QApplication, QSlider, QToolButton
 
 from kodesk.core.install import find_install
@@ -29,7 +31,8 @@ def main(argv: list[str]) -> int:
     out.mkdir(parents=True, exist_ok=True)
     app = QApplication(["kodesk-styleguide"])
     with tempfile.TemporaryDirectory() as tmp:
-        window = MainWindow(reader_context(find_install(make_pocketbook(Path(tmp) / "PB634K3"))))
+        install = find_install(make_pocketbook(Path(tmp) / "PB634K3"))
+        window = MainWindow(reader_context(install), install)
         window.resize(1400, 900)
         window.show()
         garage = window.garage
@@ -55,6 +58,14 @@ def main(argv: list[str]) -> int:
                 shot("garage-bottom-edge")
         garage.set_view(View.SLEEP)
         shot("garage-sleep")
+        QStandardPaths.setTestModeEnabled(True)  # snapshots go to a test folder, not the user's
+        dialog = window.show_snapshots()
+        assert dialog is not None
+        dialog.take()
+        app.processEvents()
+        dialog.grab().save(str(out / f"snapshots{suffix}.png"))
+        shutil.rmtree(dialog.store.base.parents[1])  # the test-mode app folder
+        dialog.close()
         window.close()
     return 0
 

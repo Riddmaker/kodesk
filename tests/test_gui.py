@@ -6,15 +6,17 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QCheckBox, QListWidget, QSlider
+from PySide6.QtCore import QStandardPaths, Qt
+from PySide6.QtWidgets import QCheckBox, QListWidget, QMessageBox, QSlider
 from pytestqt.qtbot import QtBot
 
 from kodesk.core.devices import Face
 from kodesk.core.install import find_install
-from kodesk.ui.app import MainWindow, demo_context, main, reader_context
+from kodesk.core.snapshot import RestorePlan, SnapshotStore
+from kodesk.ui.app import MainWindow, demo_context, main, reader_context, snapshot_store
 from kodesk.ui.garage import TuningGarage, View
-from tests.conftest import make_pocketbook
+from kodesk.ui.snapshots import SnapshotsDialog, human_size, plan_text
+from tests.conftest import make_pocketbook, make_reader
 
 pytestmark = pytest.mark.gui
 
@@ -173,3 +175,59 @@ def test_smoke_test_flag_starts_and_quits(qapp: object) -> None:
     """What CI runs on every packaged build: the window opens and the app exits with 0."""
     del qapp
     assert main(["--demo", "--smoke-test"]) == 0
+
+
+def test_snapshots_take_and_restore(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # Qt's test-mode folder lives in HOME
+    QStandardPaths.setTestModeEnabled(True)  # never the user's real app data folder
+    koreader = make_reader(tmp_path / "PB634K3", "pocketbook")
+    (koreader / "version.log").write_text("2026-08-26, 08:01:22, v2026.07.1, PBVerseProColor\n")
+    install = find_install(tmp_path / "PB634K3")
+    window = MainWindow(reader_context(install), install)
+    qtbot.addWidget(window)
+    store = snapshot_store(install)
+    assert store.base.is_relative_to(tmp_path)
+    dialog = window.show_snapshots()
+    assert dialog is not None and not dialog.restore_button.isEnabled()
+    qtbot.mouseClick(dialog.take_button, Qt.MouseButton.LeftButton)
+    assert dialog.list.count() == 1 and dialog.restore_button.isEnabled()
+
+    settings = koreader / "settings.reader.lua"
+    original = settings.read_bytes()
+    settings.write_text("return {}\n")
+    shown: list[str] = []
+    monkeypatch.setattr(SnapshotsDialog, "confirm", lambda _self, _snap, plan: bool(plan))
+    monkeypatch.setattr(QMessageBox, "information", lambda _p, _t, text: shown.append(text))
+    qtbot.mouseClick(dialog.restore_button, Qt.MouseButton.LeftButton)
+    assert settings.read_bytes() == original
+    assert shown == ["Restored. Your reader matches the snapshot again."]
+
+
+def test_return_does_not_take_a_snapshot(qtbot: QtBot, tmp_path: Path) -> None:
+    QStandardPaths.setTestModeEnabled(True)
+    koreader = make_reader(tmp_path / "PB634K3", "pocketbook")
+    store = SnapshotStore(tmp_path / "store")
+    dialog = SnapshotsDialog(store, koreader, None)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.keyClick(dialog.list, Qt.Key.Key_Return)
+    assert not store.snapshots() and dialog.isVisible()
+
+
+def test_sizes_are_readable() -> None:
+    assert (human_size(300), human_size(5 * 2**20)) == ("1 kB", "5 MB")
+
+
+def test_restore_preview_names_files_then_counts() -> None:
+    plan = RestorePlan(write=tuple(f"settings/{n}.lua" for n in range(32)), remove=("x.lua",))
+    text = plan_text(plan)
+    assert text.startswith("Written back (32):\n  settings/0.lua")
+    assert "… and 2 more" in text and text.endswith("Removed (1):\n  x.lua")
+
+
+def test_demo_reader_has_no_snapshots(qtbot: QtBot) -> None:
+    window = MainWindow(demo_context())
+    qtbot.addWidget(window)
+    assert not window.snapshots_action.isEnabled() and window.show_snapshots() is None

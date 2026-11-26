@@ -7,16 +7,25 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from PySide6.QtCore import QStorageInfo, QTimer
+from PySide6.QtCore import QStandardPaths, QStorageInfo, QTimer
 from PySide6.QtGui import QAction, QIcon, QKeySequence
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QWidget,
+)
 
 from kodesk import APP_ID, APP_NAME, __version__
 from kodesk.core.devices import DEVICES
 from kodesk.core.install import InstallError, KOReaderInstall, find_install
 from kodesk.core.luadump import SettingsDocument
+from kodesk.core.snapshot import SnapshotStore, device_id
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.screen import load_device_fonts
+from kodesk.ui.snapshots import SnapshotsDialog
 
 DEMO_DEVICE = "pocketbook-verse-pro-color"
 BOOK_SUFFIXES = {".epub", ".pdf", ".fb2", ".mobi", ".azw3", ".djvu", ".cbz", ".txt"}
@@ -72,6 +81,12 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
     )
 
 
+def snapshot_store(install: KOReaderInstall) -> SnapshotStore:
+    """This reader's snapshots in the platform's app data folder (never on the reader)."""
+    data = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
+    return SnapshotStore(data / "snapshots" / device_id(install.model, _volume_root(install).name))
+
+
 def detect_reader() -> KOReaderInstall | None:
     """First mounted volume that holds a KOReader installation."""
     for volume in QStorageInfo.mountedVolumes():
@@ -87,8 +102,9 @@ def detect_reader() -> KOReaderInstall | None:
 class MainWindow(QMainWindow):
     """Main window: menu bar, the Tuning-Garage, and the reader source in the status bar."""
 
-    def __init__(self, context: ReaderContext) -> None:
+    def __init__(self, context: ReaderContext, install: KOReaderInstall | None = None) -> None:
         super().__init__()
+        self.install: KOReaderInstall | None = None
         self.setWindowTitle(f"{APP_NAME} — Tuning-Garage")
         self.resize(1280, 860)
         open_action = QAction("&Open reader…", self)
@@ -101,9 +117,21 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_action)
         file_menu.addSeparator()
         file_menu.addAction(quit_action)
-        self.set_context(context)
+        self.snapshots_action = QAction("&Snapshots…", self)
+        self.snapshots_action.triggered.connect(self.show_snapshots)
+        self.menuBar().addMenu("&Reader").addAction(self.snapshots_action)
+        self.snapshots_button = QPushButton("Snapshots…", self)
+        self.snapshots_button.setObjectName("snapshots")
+        self.snapshots_button.setToolTip("Snapshots of your reader, restore in one click")
+        self.snapshots_button.clicked.connect(self.show_snapshots)
+        self.statusBar().addPermanentWidget(self.snapshots_button)
+        self.set_context(context, install)
 
-    def set_context(self, context: ReaderContext) -> None:
+    def set_context(self, context: ReaderContext, install: KOReaderInstall | None = None) -> None:
+        """Show a reader (or the demo); snapshots only exist for a real reader."""
+        self.install = install
+        self.snapshots_action.setEnabled(install is not None)
+        self.snapshots_button.setVisible(install is not None)
         self.garage = TuningGarage(context, self)
         old: QWidget | None = self.centralWidget()
         self.setCentralWidget(self.garage)
@@ -112,13 +140,23 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(context.source_label)
 
     def choose_reader(self) -> None:
+        """Let the user pick a reader mount or KOReader folder."""
         folder = QFileDialog.getExistingDirectory(self, "Choose your reader or its KOReader folder")
         if not folder:
             return
         try:
-            self.set_context(reader_context(find_install(Path(folder))))
+            install = find_install(Path(folder))
+            self.set_context(reader_context(install), install)
         except (InstallError, OSError) as error:
             QMessageBox.warning(self, APP_NAME, str(error))
+
+    def show_snapshots(self) -> SnapshotsDialog | None:
+        """Open the Snapshots window for the connected reader."""
+        if self.install is None:
+            return None
+        dialog = SnapshotsDialog(snapshot_store(self.install), self.install.root, self)
+        dialog.open()
+        return dialog
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -141,15 +179,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     app.setDesktopFileName(APP_ID)
     app.setWindowIcon(QIcon.fromTheme(APP_ID))
 
-    context = demo_context()
+    context, install = demo_context(), None
     if not args.demo:
         try:
-            install = find_install(args.path) if args.path else detect_reader()
-            if install is not None:
-                context = reader_context(install)
+            found = find_install(args.path) if args.path else detect_reader()
+            if found is not None:
+                context, install = reader_context(found), found
         except (InstallError, OSError) as error:
             print(f"{APP_NAME}: {error}; showing the demo reader", file=sys.stderr)
-    window = MainWindow(context)
+    window = MainWindow(context, install)
     window.show()
     if args.smoke_test:
         QTimer.singleShot(0, app.quit)

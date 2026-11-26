@@ -105,7 +105,15 @@ shot 03-back-pressed-page-1
 press -k Tab -k Tab -k space
 shot 04-menu-pressed-menu-open
 press -M shift -k Tab -k Tab -k Tab -m shift -k space
-shot 05-home-pressed-library
+shot 05-home-pressed-locked
+# Reader menu (Alt+R) -> Snapshots, take one with Alt+T, close the window with Escape.
+press -M alt -k r -m alt -k Return
+sleep 0.5
+shot 06-snapshots-empty
+press -M alt -k t -m alt
+sleep 1
+shot 07-snapshot-taken
+press -k Escape
 press -M ctrl -k q -m ctrl
 exited() { ! kill -0 "$app_pid"; }
 if wait_for 5 exited; then app_pid=""; echo "app quit via Ctrl+Q"; else echo "app did not quit" >&2; exit 1; fi
