@@ -44,7 +44,6 @@ from kodesk.core.layout import (
     DEFAULT_STATUS_LINE,
     DEFAULT_T_MARGIN,
     book_layout,
-    scale_by_size,
 )
 from kodesk.core.luadump import KeyPath, LuaValue, SettingsDocument, changed_paths
 from kodesk.core.statusbar import (
@@ -345,8 +344,8 @@ class TuningGarage(QWidget):
         self.panels.addWidget(scroll)
         self.panels.addWidget(
             self._info_panel(
-                "KOReader's main menu over the page. Simplified drawing: tab and item sizes "
-                "are measured in a later step."
+                "KOReader's top menu over the page, measured from KOReader's own code "
+                "(touchmenu.lua). The tab icons are drawn as plain signs."
             )
         )
         self.panels.addWidget(self._library_panel())
@@ -677,8 +676,9 @@ class TuningGarage(QWidget):
 
     def _library_panel(self) -> QWidget:
         text = (
-            "Your book folder as KOReader lists it (classic list). Simplified drawing; "
-            "mosaic view and the Project: Title look follow in B-14."
+            "Your book folder as KOReader lists it in the classic list, measured from "
+            "KOReader's own code (menu.lua). Mosaic view and the Project: Title look are not "
+            "drawn yet."
         )
         return self._info_panel(text)
 
@@ -807,15 +807,14 @@ class TuningGarage(QWidget):
         """The current view rendered at the device's own pixel size."""
         device = self.context.device
         size = device.screen_px
-        scale = scale_by_size(1, *size)
         night = self._value(("night_mode",)) is True
         if self.view is View.BOOK:
             return self._book().render(self.page)
         if self.view is View.MENU:
-            return render_menu(size, night, scale)
+            return render_menu(size, night, self._book().render(self.page))
         if self.view is View.LIBRARY:
             entries = list(self.context.library_entries) or ["(no reader connected)"]
-            return render_library(size, night, scale, entries, self.library_page)
+            return render_library(size, night, entries, self.library_page)
         if self.dropped_sleep_image is not None:
             return fit_picture(size, self.dropped_sleep_image)
         return render_sleep(size, self.context.sleep_image)

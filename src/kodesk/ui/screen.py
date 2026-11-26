@@ -27,6 +27,7 @@ from PySide6.QtGui import (
 )
 
 from kodesk.core.layout import BookLayout, scale_by_size
+from kodesk.core.menus import FileList, TouchMenu, file_list, touch_menu
 from kodesk.core.statusbar import BATTERY_SIGN, Footer, Sample, footer_text
 
 TEXT_INDENT_EM = 1.2  # koreader/data/epub.css: p { text-indent: 1.2em; }
@@ -312,76 +313,159 @@ def _canvas(size: tuple[int, int], night: bool) -> tuple[QImage, QPainter, QColo
     return image, painter, ink
 
 
-def render_menu(size: tuple[int, int], night: bool, scale: float) -> QImage:
-    """KOReader's top menu (TouchMenu) over the page — simplified: tab icons and items.
-
-    Geometry is approximate until B-13 measures touchmenu.lua; labelled as such in the UI.
-    """
-    image, painter, ink = _canvas(size, night)
-    width = size[0]
-    tab_h = round(40 * scale)
-    item_h = round(30 * scale)  # Size.item.height_default = scaleBySize(30)
-    font = _font("Noto Sans", round(20 * scale), QFont.StyleHint.SansSerif)
-    painter.setFont(font)
-    tabs = ["⚙", "☰", "🔖", "⌕", "✎", "≡"]
-    for index, glyph in enumerate(tabs):
-        rect = QRectF(index * width / len(tabs), 0, width / len(tabs), tab_h)
-        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), glyph)
-    painter.drawLine(0, tab_h, width, tab_h)
-    entries = [
-        "Table of contents",
-        "Bookmarks",
-        "Book map",
-        "Page browser",
-        "Go to page",
-        "Skim document",
-        "Follow links",
-        "Reading statistics",
-    ]
-    y = tab_h
-    for entry in entries:
-        painter.drawText(
-            QRectF(round(10 * scale), y, width, item_h), int(Qt.AlignmentFlag.AlignVCenter), entry
-        )
-        y += item_h
-        painter.setPen(QPen(ink, 1))
-        painter.drawLine(round(10 * scale), int(y), width - round(10 * scale), int(y))
-    painter.drawLine(0, int(y) + 2, width, int(y) + 2)
-    painter.end()
-    return image
+MENU_TABS = ("☰", "Aa", "⚙", "✎", "⌕", "▤", "≡")  # stand-ins for the appbar.* icons
+MENU_ITEMS = (  # the navigation tab of a reflowable book (reader_menu_order.lua navi)
+    ("Table of contents", False),
+    ("Bookmarks", False),
+    ("Book map", False),
+    ("Page browser", False),
+    ("Go to page", False),
+    ("Skim document", False),
+    ("Follow links", True),
+    ("Reading statistics", True),
+)
 
 
-def render_library(
-    size: tuple[int, int], night: bool, scale: float, entries: list[str], page: int
-) -> QImage:
-    """File browser list (classic mode) — simplified rows with title and folder marker."""
-    image, painter, _ = _canvas(size, night)
+def _paint_menu_tabs(painter: QPainter, ink: QColor, menu: TouchMenu, width: int) -> None:
+    """The tab bar; the first tab (navigation) is selected: no line under it, separators
+    left and right of it (touchmenu.lua:341-422)."""
+    top = menu.border
+    cell = 2 * menu.tab_pad + menu.icon
+    painter.setFont(_font("Noto Sans", round(menu.icon * 0.6), QFont.StyleHint.SansSerif))
+    painter.setPen(ink)
+    for index, glyph in enumerate(MENU_TABS):
+        x = menu.tab_x(index, len(MENU_TABS), width)
+        painter.drawText(QRectF(x, top, cell, menu.bar_h), int(Qt.AlignmentFlag.AlignCenter), glyph)
+    selected = menu.tab_x(0, len(MENU_TABS), width)
+    line_y = top + menu.bar_h
+    painter.fillRect(0, line_y, selected, menu.line, ink)
+    painter.fillRect(selected + cell, line_y, width - selected - cell, menu.line, ink)
+    for x in (selected - menu.tab_sep, selected + cell):
+        painter.fillRect(max(0, x), top, menu.tab_sep, menu.bar_h, ink)
+
+
+def render_menu(size: tuple[int, int], night: bool, page: QImage | None = None) -> QImage:
+    """KOReader's top menu (TouchMenu) over the book page, measured from touchmenu.lua
+    (kodesk.core.menus). Tab icons are drawn as plain signs (the real ones are SVG files)."""
     width, height = size
-    title_h = round(40 * scale)
-    row_h = round(64 * scale)
-    painter.setFont(_font("Noto Sans", round(22 * scale), QFont.StyleHint.SansSerif))
-    painter.drawText(QRectF(0, 0, width, title_h), int(Qt.AlignmentFlag.AlignCenter), "Books")
-    painter.drawLine(0, title_h, width, title_h)
-    per_page = max(1, (height - title_h - row_h) // row_h)
-    pages = max(1, -(-len(entries) // per_page))
-    page = max(0, min(page, pages - 1))
-    painter.setFont(_font("Noto Sans", round(18 * scale), QFont.StyleHint.SansSerif))
-    y = title_h
-    for entry in entries[page * per_page : (page + 1) * per_page]:
+    image, painter, ink = _canvas(size, night)
+    if page is not None:
+        painter.drawImage(0, 0, page)
+    menu = touch_menu(width, height)
+    menu_h = menu.height(len(MENU_ITEMS))
+    painter.fillRect(0, 0, width, menu_h, QColor("black") if night else QColor("white"))
+    painter.fillRect(0, 0, width, menu.border, ink)
+    painter.fillRect(0, menu_h - menu.border, width, menu.border, ink)
+    _paint_menu_tabs(painter, ink, menu, width)
+    line_y = menu.border + menu.bar_h
+    # Items: checkmark column, text, "▸" for submenus.
+    font = _font("Noto Sans", menu.item_font_px, QFont.StyleHint.SansSerif)
+    painter.setFont(font)
+    check_w = QFontMetricsF(font).horizontalAdvance("▢ ")
+    y = line_y + menu.line
+    for text, submenu in MENU_ITEMS:
         painter.drawText(
-            QRectF(round(12 * scale), y, width - round(24 * scale), row_h),
+            QRectF(menu.padding + check_w, y, width - 2 * menu.padding - check_w, menu.item_h),
             int(Qt.AlignmentFlag.AlignVCenter),
-            entry,
+            f"{text} ▸" if submenu else text,
         )
-        y += row_h
-        painter.drawLine(round(12 * scale), y, width - round(12 * scale), y)
+        y += menu.item_h + menu.item_gap
+    # Footer: one page, so only the time and battery on the right (touchmenu.lua:723).
+    footer = QRectF(
+        menu.padding, y - menu.item_gap + menu.footer_top, width - 2 * menu.padding, menu.footer_h
+    )
+    painter.setFont(_font("Noto Sans", menu.footer_font_px, QFont.StyleHint.SansSerif))
+    footer.setRight(footer.right() - scale_by_size(10, width, height))
     painter.drawText(
-        QRectF(0, height - row_h, width, row_h),
-        int(Qt.AlignmentFlag.AlignCenter),
-        f"Page {page + 1} of {pages}",
+        footer, int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), "19:26 ⌁87%"
     )
     painter.end()
     return image
+
+
+def _paint_title_bar(painter: QPainter, files: FileList, width: int, path: str) -> int:
+    """FileManager's title bar: home icon left, plus icon right, "KOReader" and the path
+    centred (filemanager.lua:118, titlebar.lua); returns its height."""
+    title_font = _font("Noto Sans", files.title_font_px, QFont.StyleHint.SansSerif)
+    title_font.setBold(True)
+    sub_font = _font("Noto Sans", files.subtitle_font_px, QFont.StyleHint.SansSerif)
+    title_line = QFontMetricsF(title_font).height()
+    sub_line = QFontMetricsF(sub_font).height()
+    # Title bar: home icon left, plus icon right, "KOReader" and the path centred.
+    icon_font = _font("Noto Sans", round(files.icon * 0.7), QFont.StyleHint.SansSerif)
+    painter.setFont(icon_font)
+    pad = files.button_pad
+    painter.drawText(
+        QRectF(pad, pad, files.icon, files.icon), int(Qt.AlignmentFlag.AlignCenter), "⌂"
+    )
+    painter.drawText(
+        QRectF(width - pad - files.icon, pad, files.icon, files.icon),
+        int(Qt.AlignmentFlag.AlignCenter),
+        "+",
+    )
+    painter.setFont(title_font)
+    painter.drawText(
+        QRectF(0, files.title_top, width, title_line),
+        int(Qt.AlignmentFlag.AlignHCenter),
+        "KOReader",
+    )
+    painter.setFont(sub_font)
+    painter.drawText(
+        QRectF(0, files.title_top + title_line + files.title_gap, width, sub_line),
+        int(Qt.AlignmentFlag.AlignHCenter),
+        path,
+    )
+    return files.title_h(title_line, sub_line)
+
+
+def render_library(
+    size: tuple[int, int], night: bool, entries: list[str], page: int, path: str = "/mnt/ext1"
+) -> QImage:
+    """The file browser in classic list mode, measured from menu.lua and titlebar.lua
+    (kodesk.core.menus). Folder sizes and file counts are not drawn (names only)."""
+    width, height = size
+    image, painter, ink = _canvas(size, night)
+    files = file_list(width, height)
+    title_h = _paint_title_bar(painter, files, width, path)
+    # Rows: name left at the side padding, a dark gray line under each.
+    item_h = files.item_h(height, title_h)
+    pages = max(1, -(-len(entries) // files.per_page))
+    page = max(0, min(page, pages - 1))
+    name_font = _font("Noto Sans", files.name_font_px, QFont.StyleHint.SansSerif)
+    metrics = QFontMetricsF(name_font)
+    painter.setFont(name_font)
+    content_w = width - 2 * files.side_pad
+    gray = QColor("#aaaaaa") if night else QColor("#555555")  # COLOR_DARK_GRAY
+    y = title_h
+    for entry in entries[page * files.per_page : (page + 1) * files.per_page]:
+        painter.setPen(ink)
+        painter.drawText(
+            QRectF(files.side_pad, y, content_w, item_h - files.line),
+            int(Qt.AlignmentFlag.AlignVCenter),
+            metrics.elidedText(entry, Qt.TextElideMode.ElideRight, content_w),
+        )
+        painter.fillRect(files.side_pad, y + item_h - files.line, content_w, files.line, gray)
+        y += item_h
+    _paint_page_footer(painter, ink if pages > 1 else gray, files, size, (page, pages))
+    painter.end()
+    return image
+
+
+def _paint_page_footer(
+    painter: QPainter, pen: QColor, files: FileList, size: tuple[int, int], page: tuple[int, int]
+) -> None:
+    """Chevrons and "Page x of y", centred at the bottom (menu.lua:808); grey on one page."""
+    width, height = size
+    painter.setPen(pen)
+    painter.setFont(_font("Noto Sans", files.footer_font_px, QFont.StyleHint.SansSerif))
+    spacer = " " * max(1, round(files.footer_spacer / max(1, files.footer_font_px / 3)))
+    text = f"Page {page[0] + 1} of {page[1]}"
+    footer = f"\u00ab{spacer}\u2039{spacer}{text}{spacer}\u203a{spacer}\u00bb"
+    painter.drawText(
+        QRectF(0, height - files.footer_h, width, files.footer_h),
+        int(Qt.AlignmentFlag.AlignCenter),
+        footer,
+    )
 
 
 def fit_picture(size: tuple[int, int], picture: QImage) -> QImage:
