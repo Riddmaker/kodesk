@@ -384,24 +384,32 @@ def render_library(
     return image
 
 
+def fit_picture(size: tuple[int, int], picture: QImage) -> QImage:
+    """A picture at exactly the screen size: scaled to fit, centred on white (the way the
+    firmware shows a sleep logo, and what kodesk puts on the reader)."""
+    canvas, painter, _ = _canvas(size, night=False)
+    scaled = picture.scaled(
+        size[0],
+        size[1],
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    painter.drawImage((size[0] - scaled.width()) // 2, (size[1] - scaled.height()) // 2, scaled)
+    painter.end()
+    return canvas
+
+
 def render_sleep(size: tuple[int, int], image_path: Path | None) -> QImage:
     """The firmware's sleep logo, scaled like the firmware does (it is stored at screen size)."""
-    canvas, painter, _ = _canvas(size, night=False)
     picture = QImage(str(image_path)) if image_path else QImage()
     if not picture.isNull():
-        scaled = picture.scaled(
-            size[0],
-            size[1],
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        painter.drawImage((size[0] - scaled.width()) // 2, (size[1] - scaled.height()) // 2, scaled)
-    else:
-        painter.setFont(_font("Noto Sans", 40, QFont.StyleHint.SansSerif))
-        painter.drawText(
-            QRect(0, 0, size[0], size[1]),
-            int(Qt.AlignmentFlag.AlignCenter),
-            f"Sleep screen\n{size[0]} × {size[1]} px",
-        )
+        return fit_picture(size, picture)
+    canvas, painter, _ = _canvas(size, night=False)
+    painter.setFont(_font("Noto Sans", 40, QFont.StyleHint.SansSerif))
+    painter.drawText(
+        QRect(0, 0, size[0], size[1]),
+        int(Qt.AlignmentFlag.AlignCenter),
+        f"Sleep screen\n{size[0]} × {size[1]} px",
+    )
     painter.end()
     return canvas

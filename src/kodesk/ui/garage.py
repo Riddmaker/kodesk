@@ -13,12 +13,13 @@ from enum import StrEnum
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QImage
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -65,7 +66,13 @@ from kodesk.core.statusbar import (
     header_key,
 )
 from kodesk.ui.device_view import DeviceView
-from kodesk.ui.screen import BookRenderer, render_library, render_menu, render_sleep
+from kodesk.ui.screen import (
+    BookRenderer,
+    fit_picture,
+    render_library,
+    render_menu,
+    render_sleep,
+)
 
 
 class View(StrEnum):
@@ -233,6 +240,7 @@ class KeyPanel(QGroupBox):
 
 # Writes the edited settings to the reader; returns a short report for the status line.
 SettingsWriter = Callable[[SettingsDocument, SettingsDocument], str]
+SleepWriter = Callable[[bytes], str]  # PNG bytes → where on the reader they went
 
 
 class ChangesBox(QGroupBox):
@@ -271,7 +279,8 @@ class TuningGarage(QWidget):
         self.previous_view = View.BOOK
         self.page = 0
         self.library_page = 0
-        self.dropped_sleep_image: QImage | None = None
+        width, height = context.device.screen_px
+        self.sleep_panel = SleepDropPanel(width, height, self)
         self._renderer: BookRenderer | None = None
 
         self.device_view = DeviceView(context.device, self)
@@ -289,6 +298,8 @@ class TuningGarage(QWidget):
         self.key_panel.invert.toggled.connect(self._set_invert)
         self.key_panel.unlock.toggled.connect(self._set_unlocked_option)
         self.changes_box = ChangesBox(self)
+        self.sleep_panel.imageDropped.connect(self._sleep_dropped)
+        self.sleep_panel.write_button.clicked.connect(self.write_sleep_picture)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self._build_center(view_switch))
@@ -339,7 +350,7 @@ class TuningGarage(QWidget):
             )
         )
         self.panels.addWidget(self._library_panel())
-        self.panels.addWidget(self._sleep_panel())
+        self.panels.addWidget(self.sleep_panel)
         self.changes_box.write_button.clicked.connect(self.write_changes)
         right = QWidget(self)
         right_layout = QVBoxLayout(right)
@@ -671,15 +682,63 @@ class TuningGarage(QWidget):
         )
         return self._info_panel(text)
 
-    def _sleep_panel(self) -> QWidget:
-        width, height = self.context.device.screen_px
-        panel = SleepDropPanel(width, height, self)
-        panel.imageDropped.connect(self._sleep_dropped)
-        return panel
+    @property
+    def dropped_sleep_image(self) -> QImage | None:
+        """The picture dropped or chosen for the sleep screen (None: the reader's own)."""
+        return self.sleep_panel.image
 
     def _sleep_dropped(self, image: QImage) -> None:
-        self.dropped_sleep_image = image
-        self.refresh()
+        self.sleep_panel.image = image
+        self.set_view(View.SLEEP)
+        self.sleep_panel.enable_write()
+
+    def set_sleep_writer(self, writer: SleepWriter | None) -> None:
+        """Allow putting sleep pictures on the reader (a connected PocketBook)."""
+        self.sleep_panel.writer = writer
+        self.sleep_panel.enable_write()
+
+    def sleep_picture_png(self) -> bytes:
+        """The chosen picture at exactly the screen size, as PNG (no metadata carried over)."""
+        assert self.dropped_sleep_image is not None
+        picture = fit_picture(self.context.device.screen_px, self.dropped_sleep_image)
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        # The stubs ask for bytes, PySide6 6.12 at runtime only takes str.
+        picture.save(buffer, "PNG")  # type: ignore[call-overload]
+        buffer.close()
+        return bytes(data.data())
+
+    def confirm_sleep_write(self) -> bool:
+        """Preview before write: exactly one new file, nothing replaced."""
+        width, height = self.context.device.screen_px
+        answer = QMessageBox.question(
+            self,
+            "Put the picture on your reader",
+            f"Add this picture ({width} × {height} px, PNG) as a new file to the Photo folder "
+            "of your reader? Nothing on the reader is replaced or changed; kodesk takes a "
+            "snapshot first.",
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def write_sleep_picture(self) -> None:
+        """Put the chosen picture on the reader, then say how to pick it there."""
+        writer = self.sleep_panel.writer
+        if writer is None or self.dropped_sleep_image is None or not self.confirm_sleep_write():
+            return
+        try:
+            where = writer(self.sleep_picture_png())
+        except Exception as error:  # pylint: disable=broad-exception-caught  # shown, not raised
+            QMessageBox.warning(self, "Put the picture on your reader", str(error))
+            return
+        self.status.setText(f"Picture added to your reader: {where}")
+        QMessageBox.information(
+            self,
+            "Picture added",
+            f"The picture is on your reader as {where}.\n\nTo use it as the sleep screen, "
+            "on the reader open Settings → Personalize → Logos, choose the sleep logo and pick "
+            "the picture. The firmware, not KOReader, shows it.",
+        )
 
     # ----------------------------------------------------------------- hardware keys
 
@@ -758,12 +817,7 @@ class TuningGarage(QWidget):
             entries = list(self.context.library_entries) or ["(no reader connected)"]
             return render_library(size, night, scale, entries, self.library_page)
         if self.dropped_sleep_image is not None:
-            return self.dropped_sleep_image.scaled(
-                size[0],
-                size[1],
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+            return fit_picture(size, self.dropped_sleep_image)
         return render_sleep(size, self.context.sleep_image)
 
     def refresh(self) -> None:
@@ -805,19 +859,45 @@ class SleepDropPanel(QGroupBox):
     def __init__(self, width: int, height: int, parent: QWidget | None = None) -> None:
         super().__init__("Sleep screen", parent)
         self.setAcceptDrops(True)
+        self.image: QImage | None = None
+        self.writer: SleepWriter | None = None
         layout = QVBoxLayout(self)
         self.hint = QLabel(
-            f"<p>Drop a picture here.</p><p><b>Best size: {width} × {height} px</b> "
-            "(portrait). Other sizes are scaled to fit.</p>"
-            "<p>On PocketBook the firmware draws the sleep screen, not KOReader: kodesk will "
-            "place the picture in the reader's <code>Photo</code> folder; you then choose it "
+            f"<p>Drop a picture here or choose one.</p><p><b>Best size: {width} × {height} px"
+            "</b> (portrait). Other sizes are scaled to fit, on white.</p>"
+            "<p>On PocketBook the firmware draws the sleep screen, not KOReader: kodesk "
+            "adds the picture to the reader's <code>Photo</code> folder; you then choose it "
             "on the reader under Settings → Personalize → Logos.</p>",
             self,
         )
         self.hint.setWordWrap(True)
         self.hint.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.hint)
+        choose = QPushButton("&Choose picture…", self)
+        choose.setObjectName("sleep-choose")
+        choose.clicked.connect(self.choose)
+        self.write_button = QPushButton("&Put on reader…", self)
+        self.write_button.setObjectName("sleep-write")
+        self.write_button.setToolTip("Needs a connected PocketBook")
+        self.write_button.setEnabled(False)
+        row = QHBoxLayout()
+        row.addWidget(choose)
+        row.addWidget(self.write_button)
+        row.addStretch(1)
+        layout.addLayout(row)
         layout.addStretch(1)
+
+    def enable_write(self) -> None:
+        self.write_button.setEnabled(self.writer is not None and self.image is not None)
+
+    def choose(self) -> None:
+        """The keyboard way to the drop zone: a file dialog for one picture."""
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Choose a picture", "", "Pictures (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
+        )
+        image = QImage(path) if path else QImage()
+        if not image.isNull():
+            self.imageDropped.emit(image)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls() or event.mimeData().hasImage():

@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QStorageInfo, QTimer
@@ -26,7 +27,8 @@ from kodesk.core.devices import DEVICES
 from kodesk.core.install import InstallError, KOReaderInstall, find_install, volume_root
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.settings_write import write_settings
-from kodesk.core.snapshot import SnapshotStore, device_id
+from kodesk.core.sleepscreen import PHOTO_DIR, PLATFORMS, place_picture
+from kodesk.core.snapshot import SnapshotStore, device_id, guarded_write
 from kodesk.core.volume import volume_serial
 from kodesk.ui.changes import ChangeRunner
 from kodesk.ui.garage import ReaderContext, TuningGarage
@@ -203,6 +205,8 @@ class MainWindow(QMainWindow):
             self.garage.set_writer(
                 lambda before, after: self._write_settings(install, before, after)
             )
+            if install.platform in PLATFORMS:
+                self.garage.set_sleep_writer(lambda data: self._write_sleep(install, data))
             QTimer.singleShot(0, self.check_health)
 
     def show_reader(self, install: KOReaderInstall | None) -> str | None:
@@ -272,6 +276,19 @@ class MainWindow(QMainWindow):
         )
         taken = snapshot.created.astimezone().strftime("%H:%M")
         return f"Written to your reader. Snapshot from {taken} kept (Reader → Snapshots…)."
+
+    def _write_sleep(self, install: KOReaderInstall, data: bytes) -> str:
+        """Add a sleep-screen picture to the reader's Photo folder, inside a snapshot."""
+        store = snapshot_store(install)
+        placed: list[Path] = []
+
+        def write() -> None:
+            placed.append(place_picture(volume_root(install), data, datetime.now()))
+
+        with_snapshot_progress(
+            self, lambda progress: guarded_write(store, install.root, write, (), (), progress)
+        )
+        return f"{PHOTO_DIR}/{placed[0].name}"
 
     def check_health(self) -> QMessageBox | None:
         """After a write: did it finish, and did KOReader load every plugin and patch since?

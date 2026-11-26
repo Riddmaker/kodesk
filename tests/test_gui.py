@@ -10,9 +10,11 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QStandardPaths, Qt
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QListWidget,
     QMessageBox,
     QProgressDialog,
@@ -478,3 +480,37 @@ def test_snapshot_folder_keeps_older_snapshots(
     assert snapshot_store(install).base == older
     fresh.mkdir(parents=True)
     assert snapshot_store(install).base == fresh
+
+
+def test_sleep_picture_is_chosen_previewed_and_put_on_the_reader(
+    qtbot: QtBot, pocketbook: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    QStandardPaths.setTestModeEnabled(True)  # snapshots into a test folder
+    install = find_install(pocketbook)
+    window = MainWindow(reader_context(install), install, offline=True)
+    qtbot.addWidget(window)
+    garage = window.garage
+    write = garage.findChild(QPushButton, "sleep-write")
+    assert write is not None and not write.isEnabled()  # nothing chosen yet
+    picture = QImage(300, 200, QImage.Format.Format_RGB32)
+    picture.fill(QColor("red"))
+    source = tmp_path / "cat.png"
+    picture.save(str(source))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(source), ""))
+    choose = garage.findChild(QPushButton, "sleep-choose")
+    assert choose is not None
+    choose.click()  # keyboard users get here with Alt+C, no drag and drop needed
+    assert garage.view is View.SLEEP and write.isEnabled()
+    shown = garage.screen_image()
+    assert (shown.width(), shown.height()) == garage.context.device.screen_px
+    assert shown.pixelColor(0, 0) == QColor("white")  # letterboxed on white
+    monkeypatch.setattr(TuningGarage, "confirm_sleep_write", lambda _self: True)
+    guides: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda _p, _t, text: guides.append(text))
+    monkeypatch.setattr(QMessageBox, "warning", lambda _p, _t, text: guides.append(text))
+    write.click()
+    placed = list((pocketbook / "Photo").glob("kodesk-sleep-*.png"))
+    assert len(placed) == 1
+    assert QImage(str(placed[0])).size() == shown.size()
+    assert "Settings → Personalize → Logos" in guides[0]
+    assert snapshot_store(find_install(pocketbook)).snapshots()  # snapshot first (hard rule)

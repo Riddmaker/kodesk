@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from kodesk.core.luadump import dump_file
 from kodesk.core.net import CancelledError, NetError, Response
@@ -373,6 +373,19 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(f"a test tried to reach the network: {url}")
 
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_blocking_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A message box a test did not patch would wait for a click forever and hang the whole
+    run: fail the test at once instead, naming the dialog. Tests patch what they expect."""
+
+    def refuse(*args: object, **_kwargs: object) -> None:
+        texts = [a for a in args if isinstance(a, str)]
+        raise AssertionError(f"a test opened a blocking message box: {texts}")
+
+    for name in ("information", "warning", "critical", "question"):
+        monkeypatch.setattr(QMessageBox, name, refuse)
 
 
 @pytest.fixture(autouse=True)
