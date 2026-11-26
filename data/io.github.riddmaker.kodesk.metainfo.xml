@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.riddmaker.kodesk</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>kodesk</name>
+  <summary>Update, extend and tune KOReader on your e-reader</summary>
+  <description>
+    <p>
+      kodesk is a desktop companion for e-readers running KOReader. Plug your reader in,
+      then update KOReader, add community plugins and patches, and tune how your reader looks,
+      without breaking the setup you carefully built.
+    </p>
+    <p>Every change is previewed first and backed up by a snapshot you can restore with one click.</p>
+  </description>
+  <developer id="io.github.riddmaker">
+    <name>Riddmaker</name>
+  </developer>
+  <launchable type="desktop-id">io.github.riddmaker.kodesk.desktop</launchable>
+  <url type="homepage">https://github.com/Riddmaker/kodesk</url>
+  <url type="bugtracker">https://github.com/Riddmaker/kodesk/issues</url>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-11-26" type="development">
+      <description><p>First development snapshot.</p></description>
+    </release>
+  </releases>
+</component>

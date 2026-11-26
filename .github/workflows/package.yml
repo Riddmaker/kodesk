@@ -1,0 +1,143 @@
+# Bundles for the four channels (B-01): Nix is built in ci.yml; here Flatpak, Windows, macOS.
+# On a version tag the bundles plus sdist and wheel become a GitHub Release.
+name: Package
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flatpak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.11
+      options: --privileged
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          manifest-path: data/flatpak/io.github.riddmaker.kodesk.yml
+          bundle: kodesk.flatpak
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Bundle with PyInstaller
+        run: |
+          python -m pip install -r data/packaging/requirements-bundle.txt
+          pyinstaller --noconfirm data/packaging/kodesk.spec
+      - name: Start check (window opens and quits)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $p = Start-Process dist\kodesk\kodesk.exe -ArgumentList '--demo','--smoke-test' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "kodesk exited with $($p.ExitCode)" }
+      - name: Installer (Inno Setup, preinstalled on the runner)
+        shell: pwsh
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'src'); import kodesk; print(kodesk.__version__)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" data\windows\kodesk.iss
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-installer
+          path: dist/*-setup.exe
+
+  macos:
+    runs-on: macos-latest # Apple Silicon
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Bundle with PyInstaller
+        run: |
+          python -m pip install -r data/packaging/requirements-bundle.txt
+          pyinstaller --noconfirm data/packaging/kodesk.spec
+      - name: Start check (window opens and quits)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/kodesk.app/Contents/MacOS/kodesk --demo --smoke-test
+      - name: Sign and notarize (skipped until the Apple secrets exist)
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE_P12_BASE64" ]; then
+            echo "::warning::Apple signing secrets not set: the .app stays unsigned."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -base64 24)"
+          certificate="$RUNNER_TEMP/certificate.p12"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
+          security list-keychain -d user -s "$keychain"
+          rm -f "$certificate"
+          codesign --deep --force --options runtime --timestamp \
+            --sign "$MACOS_SIGNING_IDENTITY" dist/kodesk.app
+          codesign --verify --deep --strict dist/kodesk.app
+          ditto -c -k --keepParent dist/kodesk.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple dist/kodesk.app
+      - name: Zip the app
+        run: ditto -c -k --keepParent dist/kodesk.app dist/kodesk-macos-arm64.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-app
+          path: dist/kodesk-macos-arm64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [flatpak, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build --outdir dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: bundles
+          merge-multiple: true
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          files: |
+            dist/*
+            bundles/*
