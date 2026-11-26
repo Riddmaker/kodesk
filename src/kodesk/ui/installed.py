@@ -93,6 +93,7 @@ class InstalledPage(QWidget):  # pylint: disable=too-many-instance-attributes  #
     remove_requested = Signal(object)  # Key
     source_requested = Signal(object)  # Key
     check_requested = Signal()
+    koreader_update_requested = Signal()
 
     def __init__(self, parent: QWidget | None) -> None:
         super().__init__(parent)
@@ -114,7 +115,20 @@ class InstalledPage(QWidget):  # pylint: disable=too-many-instance-attributes  #
         self.tree.setHeaderLabels(list(COLUMNS))
         self.tree.setRootIsDecorated(False)
         self.tree.currentItemChanged.connect(lambda *_args: self._enable())
+        self.koreader = QLabel(self)
+        self.koreader.setObjectName("installed-koreader")
+        self.koreader.setTextFormat(Qt.TextFormat.PlainText)  # the version comes from the device
+        self.koreader_button = QPushButton("Update &KOReader…", self)
+        self.koreader_button.setObjectName("installed-koreader-update")
+        self.koreader_button.setToolTip(
+            "Downloads the latest stable KOReader from GitHub and shows what changes first"
+        )
+        self.koreader_button.clicked.connect(self.koreader_update_requested.emit)
+        koreader_row = QHBoxLayout()
+        koreader_row.addWidget(self.koreader, 1)
+        koreader_row.addWidget(self.koreader_button)
         layout = QVBoxLayout(self)
+        layout.addLayout(koreader_row)
         layout.addWidget(self.summary)
         layout.addWidget(self.show_built_in)
         layout.addWidget(self.tree, 1)
@@ -159,7 +173,8 @@ class InstalledPage(QWidget):  # pylint: disable=too-many-instance-attributes  #
                 self.plugins = ()
             self.patches = list_patches(install.root)
         self.updates = {}
-        for widget in (self.show_built_in, self.tree, self.check_button):
+        self.set_koreader_status("")
+        for widget in (self.show_built_in, self.tree, self.check_button, self.koreader_button):
             widget.setVisible(install is not None)
         for button in (self.update_button, self.remove_button, self.source_button):
             button.setVisible(install is not None)
@@ -174,6 +189,14 @@ class InstalledPage(QWidget):  # pylint: disable=too-many-instance-attributes  #
         self.records = {(r.kind, r.name): r for r in records}
         self.entries = tuple(entries)
         self.refresh()
+
+    def set_koreader_status(self, status: str) -> None:
+        """The installed KOReader version, and what "Check for updates" found for it."""
+        if self.install is None:
+            self.koreader.clear()
+            return
+        version = f"KOReader {self.install.version or '(version unknown)'}"
+        self.koreader.setText(f"{version} · {status}" if status else version)
 
     def set_updates(self, updates: Mapping[Key, str]) -> None:
         """Results of "Check for updates", per item."""

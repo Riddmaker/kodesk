@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,9 +21,9 @@ from PySide6.QtWidgets import (
 )
 
 from kodesk import APP_ID, APP_NAME, __version__
-from kodesk.core import catalogue, healthcheck
+from kodesk.core import catalogue, healthcheck, net
 from kodesk.core.devices import DEVICES
-from kodesk.core.install import InstallError, KOReaderInstall, find_install
+from kodesk.core.install import InstallError, KOReaderInstall, find_install, volume_root
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.settings_write import write_settings
 from kodesk.core.snapshot import SnapshotStore, device_id
@@ -30,6 +31,7 @@ from kodesk.core.volume import volume_serial
 from kodesk.ui.changes import ChangeRunner
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.installed import InstalledPage
+from kodesk.ui.koupdate import KOReaderUpdater
 from kodesk.ui.screen import load_device_fonts
 from kodesk.ui.snapshots import SnapshotsDialog
 from kodesk.ui.store import StorePage
@@ -58,18 +60,13 @@ def _library_entries(home: Path) -> tuple[str, ...]:
     return tuple(f"{p.name}/" if p.is_dir() else p.stem for p in entries[:MAX_LIBRARY_ENTRIES])
 
 
-def _volume_root(install: KOReaderInstall) -> Path:
-    relative = {"pocketbook": 2, "kobo": 2, "kindle": 1}.get(install.platform, 1)
-    return install.root.parents[relative - 1]
-
-
 def reader_context(install: KOReaderInstall) -> ReaderContext:
     """Read everything the garage shows from a connected reader."""
     if install.device is None:
         raise InstallError(
             f"Reader model {install.model or 'unknown'} has no device definition yet."
         )
-    volume = _volume_root(install)
+    volume = volume_root(install)
     settings = install.read_settings()
     home = settings.get(("home_dir",))
     home_path = volume / "Books"
@@ -91,7 +88,7 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
 def snapshot_store(install: KOReaderInstall) -> SnapshotStore:
     """This reader's snapshots in the platform's app data folder (never on the reader)."""
     data = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
-    volume = _volume_root(install)
+    volume = volume_root(install)
     serial = volume_serial(
         bytes(QStorageInfo(str(volume)).device().data()).decode(errors="replace")
     )
@@ -157,9 +154,16 @@ class MainWindow(QMainWindow):
         self.installed.update_requested.connect(self.changes.update)
         self.installed.remove_requested.connect(self.changes.remove)
         self.installed.source_requested.connect(self.changes.set_source)
-        self.installed.check_requested.connect(
-            lambda: self.changes.check(self.installed.checkable(), self.installed.set_updates)
+        self.koupdate = KOReaderUpdater(
+            self,
+            None if offline else net.https_get,
+            None if offline else net.https_save,
+            snapshot_store,
+            self.reread_install,
+            self.changes.remove,
         )
+        self.installed.koreader_update_requested.connect(self.koupdate.start)
+        self.installed.check_requested.connect(self.check_updates)
         self.tabs.currentChanged.connect(self._tab_changed)
         self.setWindowTitle(APP_NAME)
         self.resize(1280, 860)
@@ -175,7 +179,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
         self.snapshots_action = QAction("&Snapshots…", self)
         self.snapshots_action.triggered.connect(self.show_snapshots)
-        self.menuBar().addMenu("&Reader").addAction(self.snapshots_action)
+        self.koreader_action = QAction("Update &KOReader…", self)
+        self.koreader_action.triggered.connect(self.koupdate.start)
+        reader_menu = self.menuBar().addMenu("&Reader")
+        reader_menu.addAction(self.snapshots_action)
+        reader_menu.addAction(self.koreader_action)
         self.snapshots_button = QPushButton("Snapshots…", self)
         self.snapshots_button.setObjectName("snapshots")
         self.snapshots_button.setToolTip("Snapshots of your reader, restore in one click")
@@ -187,6 +195,7 @@ class MainWindow(QMainWindow):
         """Show a reader (or the demo); snapshots only exist for a real reader."""
         self.install = install
         self.snapshots_action.setEnabled(install is not None)
+        self.koreader_action.setEnabled(install is not None)
         self.snapshots_button.setVisible(install is not None)
         old: QWidget | None = getattr(self, "garage", None)
         self.garage = TuningGarage(context, self)
@@ -196,6 +205,7 @@ class MainWindow(QMainWindow):
         self.tabs.insertTab(0, self.garage, "Tuning-&Garage")
         self.tabs.setCurrentIndex(0)
         self.changes.install = install
+        self.koupdate.install = install
         self.reread()
         self.statusBar().showMessage(context.source_label)
         if install is not None:
@@ -213,6 +223,19 @@ class MainWindow(QMainWindow):
             frozenset(p.name for p in self.installed.patches),
         )
         self._show_sources()
+
+    def reread_install(self) -> None:
+        """After a KOReader update: its version (and so on) as the reader has it now."""
+        if self.install is not None:
+            with contextlib.suppress(InstallError, OSError):  # reader gone: show what was there
+                self.install = find_install(self.install.root)
+            self.changes.install = self.koupdate.install = self.install
+        self.reread()
+
+    def check_updates(self) -> None:
+        """Ask GitHub about the plugins and patches, and about KOReader itself."""
+        self.changes.check(self.installed.checkable(), self.installed.set_updates)
+        self.koupdate.check(self.installed.set_koreader_status)
 
     def _show_sources(self) -> None:
         records = self.changes.records() if self.install is not None else None
@@ -239,15 +262,20 @@ class MainWindow(QMainWindow):
         return f"Written to your reader. Snapshot from {taken} kept (Reader → Snapshots…)."
 
     def check_health(self) -> QMessageBox | None:
-        """After a write: did KOReader load every plugin and patch since? Offer the way back."""
+        """After a write: did it finish, and did KOReader load every plugin and patch since?
+        Offer the way back."""
         if self.install is None:
             return None
-        store = snapshot_store(self.install)
+        # First: a KOReader update that did not finish (the log check would blame its plugins).
+        return self.koupdate.interrupted(self.offer_restore) or self._check_log(self.install)
+
+    def _check_log(self, install: KOReaderInstall) -> QMessageBox | None:
+        store = snapshot_store(install)
         pending = healthcheck.load_pending(store.base)
         if pending is None:
             return None
         try:
-            report = healthcheck.check(self.install.root, pending)
+            report = healthcheck.check(install.root, pending)
         except OSError:
             return None  # reader gone; the check stays pending
         if not report.started:

@@ -9,6 +9,10 @@ A file that did not change between snapshots is stored once, so keeping five cos
 copy of the folder plus what changed. The manifest is written last (temp file + rename): a
 snapshot interrupted by unplugging the reader simply does not exist.
 
+A KOReader update (B-06) also changes the launcher beside the KOReader folder (PocketBook:
+``applications/koreader.app``); a snapshot can keep such a file too, stored as ``../<name>``.
+Only the names in :data:`OUTSIDE` are accepted, nothing else outside the folder.
+
 The never-touch list (ARCHITECTURE-SECURITY §4) is :func:`is_protected`. :func:`guarded_write`
 runs one write between a snapshot and a byte-for-byte check of the protected files; a mismatch
 or a failed write restores the snapshot.
@@ -43,6 +47,7 @@ PROTECTED_DIRS = frozenset(
 FREE_SPACE_MARGIN = 64 * 1024 * 1024
 CHUNK = 1 << 20
 TEMP_SUFFIX = ".kodesk-tmp"
+OUTSIDE = frozenset({"koreader.app"})  # files beside the KOReader folder a snapshot may keep
 _SNAPSHOT_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z(?:-[0-9]+)?$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _UNSAFE_PATH = re.compile(r"[\\\0]|^[A-Za-z]:")  # backslash, NUL, drive letter
@@ -74,10 +79,11 @@ class Snapshot:
     id: str
     created: datetime
     files: tuple[FileEntry, ...]
+    outside: tuple[FileEntry, ...] = ()  # "../koreader.app": beside the KOReader folder
 
     @property
     def size(self) -> int:
-        return sum(entry.size for entry in self.files)
+        return sum(entry.size for entry in (*self.files, *self.outside))
 
     def by_path(self) -> dict[str, FileEntry]:
         return {entry.path: entry for entry in self.files}
@@ -133,6 +139,17 @@ def _check_relative(path: str) -> str:
     return path
 
 
+def _check_outside(path: str) -> str:
+    """``../<name>`` for a name in :data:`OUTSIDE`; anything else is refused."""
+    if not path.startswith("../") or path.removeprefix("../") not in OUTSIDE:
+        raise SnapshotError(f"unexpected file outside the KOReader folder: {path!r}")
+    return path
+
+
+def _outside_target(koreader_dir: Path, path: str) -> Path:
+    return koreader_dir.parent / _check_outside(path).removeprefix("../")
+
+
 def walk(koreader_dir: Path) -> list[str]:
     """Relative paths of all regular files to snapshot, sorted; symlinks are refused."""
     found: list[str] = []
@@ -178,17 +195,30 @@ class SnapshotStore:
 
     # -- taking ---------------------------------------------------------------------------
 
-    def take(self, koreader_dir: Path) -> Snapshot:
-        """Copy every file (not cache/, not the log) to the store; the manifest is written last."""
+    def take(self, koreader_dir: Path, outside: Iterable[str] = ()) -> Snapshot:
+        """Copy every file (not cache/, not the log) to the store; the manifest is written last.
+
+        ``outside`` names files beside the folder to keep too (only names in :data:`OUTSIDE`).
+        """
         paths = walk(koreader_dir)
-        self._check_free_space(koreader_dir, paths)
+        extra = [
+            f"../{name}"
+            for name in sorted(set(outside))
+            if _outside_target(koreader_dir, f"../{name}").is_file()
+        ]
+        self._check_free_space(koreader_dir, [*paths, *extra])
         self.blobs.mkdir(parents=True, exist_ok=True)
         self.manifests.mkdir(parents=True, exist_ok=True)
-        entries = []
+        entries: list[FileEntry] = []
+        beside: list[FileEntry] = []
         temp = self.blobs / f"incoming{TEMP_SUFFIX}"
         try:
-            for relative in paths:
-                source = koreader_dir / relative
+            for relative in [*paths, *extra]:
+                source = (
+                    _outside_target(koreader_dir, relative)
+                    if relative.startswith("../")
+                    else koreader_dir / relative
+                )
                 digest = _copy_hashing(source, temp)
                 blob = self._blob(digest)
                 if blob.exists():
@@ -196,15 +226,17 @@ class SnapshotStore:
                 else:
                     blob.parent.mkdir(exist_ok=True)
                     temp.replace(blob)
-                entries.append(FileEntry(relative, source.stat().st_size, digest))
+                entry = FileEntry(relative, source.stat().st_size, digest)
+                (beside if relative.startswith("../") else entries).append(entry)
         finally:
             temp.unlink(missing_ok=True)
-        snapshot = Snapshot(self._new_id(), self._clock(), tuple(entries))
+        snapshot = Snapshot(self._new_id(), self._clock(), tuple(entries), tuple(beside))
         self._write_manifest(snapshot)
         self.prune()
         return snapshot
 
     def _check_free_space(self, koreader_dir: Path, paths: Iterable[str]) -> None:
+        # "../koreader.app" is the file beside the folder, as in take
         needed = sum((koreader_dir / p).stat().st_size for p in paths) + FREE_SPACE_MARGIN
         self.base.mkdir(parents=True, exist_ok=True)
         free = shutil.disk_usage(self.base).free
@@ -228,6 +260,8 @@ class SnapshotStore:
             "created": snapshot.created.isoformat(),
             "files": [[e.path, e.size, e.sha256] for e in snapshot.files],
         }
+        if snapshot.outside:
+            data["outside"] = [[e.path, e.size, e.sha256] for e in snapshot.outside]
         target = self.manifests / f"{snapshot.id}.json"
         temp = target.with_name(target.name + TEMP_SUFFIX)
         temp.write_text(json.dumps(data, indent=0), encoding="utf-8")
@@ -257,17 +291,21 @@ class SnapshotStore:
                 FileEntry(_check_relative(str(path)), int(size), str(digest))
                 for path, size, digest in data["files"]
             )
+            outside = tuple(
+                FileEntry(_check_outside(str(path)), int(size), str(digest))
+                for path, size, digest in data.get("outside", [])
+            )
             created = datetime.fromisoformat(str(data["created"]))
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             raise SnapshotError(f"snapshot {snapshot_id} is unreadable ({error})") from error
-        return Snapshot(snapshot_id, created, files)
+        return Snapshot(snapshot_id, created, files, outside)
 
     def prune(self, keep: int = KEEP) -> None:
         """Keep the newest ``keep`` snapshots and drop blobs no kept snapshot uses."""
         kept = self.snapshots()
         for old in kept[keep:]:
             (self.manifests / f"{old.id}.json").unlink()
-        used = {entry.sha256 for snap in kept[:keep] for entry in snap.files}
+        used = {e.sha256 for snap in kept[:keep] for e in (*snap.files, *snap.outside)}
         if not self.blobs.is_dir():
             return
         for blob in self.blobs.glob("*/*"):
@@ -286,15 +324,21 @@ class SnapshotStore:
             if path not in present or file_sha256(koreader_dir / path) != entry.sha256
         ]
         remove = sorted(present - wanted.keys())
+        for entry in snapshot.outside:  # written back if changed; never removed
+            target = _outside_target(koreader_dir, entry.path)
+            if not target.is_file() or file_sha256(target) != entry.sha256:
+                write.append(entry.path)
         return RestorePlan(tuple(sorted(write)), tuple(remove))
 
     def restore(self, koreader_dir: Path, snapshot: Snapshot) -> RestorePlan:
         """Bring the folder back to the snapshot byte for byte, then check it."""
         plan = self.plan_restore(koreader_dir, snapshot)
-        wanted = snapshot.by_path()
+        wanted = {**snapshot.by_path(), **{e.path: e for e in snapshot.outside}}
         root = koreader_dir.resolve()
         for path in plan.write:
-            target = self._inside(root, path)
+            target = (
+                _outside_target(root, path) if path.startswith("../") else self._inside(root, path)
+            )
             blob = self._blob(wanted[path].sha256)
             if not blob.is_file():
                 raise SnapshotError(f"snapshot {snapshot.id} is missing the content of {path}")
@@ -355,16 +399,18 @@ def guarded_write(
     koreader_dir: Path,
     write: Callable[[], None],
     allowed: Iterable[str] = (),
+    outside: Iterable[str] = (),
 ) -> Snapshot:
     """Snapshot, run ``write``, verify the protected files; restore on any failure.
 
     ``allowed`` names the protected files this write is meant to change (e.g. the Tuning-Garage
     and ``settings.reader.lua``; a folder ends with ``/``, e.g. ``plugins/x.koplugin/`` for an
-    update of that plugin); every other protected file must stay byte-identical. After a
+    update of that plugin); every other protected file must stay byte-identical. ``outside``
+    names files beside the folder the write changes (see :data:`OUTSIDE`). After a
     good write the next connect checks KOReader's log (:mod:`kodesk.core.healthcheck`).
     """
     third_party = third_party_plugins(koreader_dir)
-    snapshot = store.take(koreader_dir)
+    snapshot = store.take(koreader_dir, outside)
     try:
         write()
     except Exception as error:  # pylint: disable=broad-exception-caught  # any failure: undo

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from kodesk.core.luadump import dump_file
-from kodesk.core.net import NetError, Response
+from kodesk.core.net import CancelledError, NetError, Response
 from kodesk.core.snapshot import SnapshotStore
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -83,21 +83,60 @@ def release_listing(platform: str) -> list[str]:
     return path.read_text(encoding="utf-8").split()
 
 
-def make_release_zip(target: Path, platform: str, extra: dict[str, bytes] | None = None) -> Path:
-    """A fake release archive with the real member names; ``extra`` adds hostile members."""
+# Archive members KOReader's own update skips, so its ota/package.index leaves them out.
+NOT_INDEXED = {"pocketbook": ("system/",), "kobo": ("koreader.png",), "kindle": ()}
+
+
+def make_release_zip(  # pylint: disable=too-many-arguments
+    target: Path,
+    platform: str,
+    extra: dict[str, bytes] | None = None,
+    *,
+    version: str = RELEASE,
+    changed: dict[str, bytes] | None = None,
+    dropped: tuple[str, ...] = (),
+) -> Path:
+    """A fake release archive with the real member names.
+
+    ``extra`` adds hostile members (not in the index); ``changed`` replaces or adds shipped
+    files (listed in the index); ``dropped`` leaves shipped files out of archive and index.
+    """
+    files = shipped_files(platform, version, changed, dropped)
     with zipfile.ZipFile(target, "w") as archive:
-        for name in release_listing(platform):
-            archive.writestr(name, _shipped_content(name, platform))
+        for name, data in files.items():
+            archive.writestr(name, data)
         for name, data in (extra or {}).items():
             archive.writestr(name, data)
     return target
 
 
-def _shipped_content(name: str, platform: str) -> bytes:
+def shipped_files(
+    platform: str,
+    version: str = RELEASE,
+    changed: dict[str, bytes] | None = None,
+    dropped: tuple[str, ...] = (),
+) -> dict[str, bytes]:
+    """Archive member -> content of a fake release (see :func:`make_release_zip`)."""
+    names = [n for n in release_listing(platform) if n not in dropped]
+    names += [n for n in (changed or {}) if n not in names]
+    index = next(n for n in names if n.endswith("ota/package.index"))
+    listed = [n for n in names if not n.startswith(NOT_INDEXED[platform])]
+    files = {}
+    for name in names:
+        if name == index:
+            files[name] = "".join(f"{member}\n" for member in listed).encode()
+        elif name in (changed or {}):
+            files[name] = (changed or {})[name]
+        else:
+            files[name] = _shipped_content(name, version)
+    return files
+
+
+def _shipped_content(name: str, version: str = RELEASE) -> bytes:
     if name.endswith("/git-rev"):
-        return f"{RELEASE}\n".encode()
-    if name.endswith("/ota/package.index"):
-        return "".join(f"../{member}\n" for member in release_listing(platform)).encode()
+        return f"{version}\n".encode()
+    if name.endswith(".app"):
+        return f"#!/bin/sh\n# {name} {version}\n".encode()
     return f"-- {name}\n".encode()
 
 
@@ -107,10 +146,10 @@ def make_reader(root: Path, platform: str, settings: dict[object, object] | None
     User state: settings, history, a settings/ file, a style tweak, a third-party plugin, a user
     patch and a book with its .sdr metadata. Returns the KOReader directory.
     """
-    for name in release_listing(platform):
+    for name, shipped in shipped_files(platform).items():
         path = root / (UNPACK_DIR[platform] + name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(_shipped_content(name, platform))
+        path.write_bytes(shipped)
     koreader = root / KOREADER_DIR[platform]
     data = OWNER_LIKE_SETTINGS if settings is None else settings
     user_files = {
@@ -291,6 +330,37 @@ class FakeGitHub:
         body = {"tag_name": tag, "draft": False, "prerelease": False, "assets": listed}
         api = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
         self.files[api] = json.dumps(body).encode()
+
+    def koreader(
+        self, tag: str, archive: Path, platform: str = "pocketbook", latest: bool = True
+    ) -> None:
+        """A KOReader release (api.github.com/repos/koreader/koreader) with one archive."""
+        name = f"koreader-{platform}-{tag}.zip"
+        url = f"https://github.com/koreader/koreader/releases/download/{tag}/{name}"
+        data = archive.read_bytes()
+        self.files[url] = data
+        asset = {
+            "name": name,
+            "browser_download_url": url,
+            "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+        }
+        body = json.dumps(
+            {"tag_name": tag, "draft": False, "prerelease": False, "assets": [asset]}
+        ).encode()
+        api = "https://api.github.com/repos/koreader/koreader/releases"
+        self.files[f"{api}/tags/{tag}"] = body
+        if latest:
+            self.files[f"{api}/latest"] = body
+
+    def save(self, url: str, target: Path, limit: int, cancelled: Callable[[], bool]) -> str:
+        """Like :func:`kodesk.core.net.https_save`: the file and its SHA-256."""
+        body = self(url, {}, limit)
+        if cancelled():
+            raise CancelledError("download cancelled")
+        with target.open("xb") as out:
+            out.write(body.body)
+        return hashlib.sha256(body.body).hexdigest()
 
 
 @pytest.fixture(autouse=True)

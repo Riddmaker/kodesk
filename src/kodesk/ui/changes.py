@@ -24,7 +24,7 @@ from kodesk.core.installer import Action, Change, InstallerError
 from kodesk.core.net import Get, NetError
 from kodesk.core.records import Record, Records, RecordsError
 from kodesk.core.snapshot import SnapshotError, SnapshotStore
-from kodesk.ui.snapshots import MAX_LISTED, busy
+from kodesk.ui.snapshots import busy, path_lines
 from kodesk.ui.store import Results, run_in_background
 
 ACTION_WORD = {Action.INSTALL: "Install", Action.UPDATE: "Update", Action.REMOVE: "Remove"}
@@ -77,18 +77,14 @@ def preview_text(prepared: Prepared) -> tuple[str, str, str]:
         lines.append("Files: " + ", ".join(counts) + ".")
     lines += change.notes
     lines.append("kodesk takes a snapshot first; Reader → Snapshots… brings everything back.")
-    details = []
-    for title, paths in (
-        ("Added", change.add),
-        ("Replaced", change.replace),
-        ("Removed", change.remove),
-        ("Kept", change.keep),
-    ):
-        if paths:
-            details.append(f"{title} ({len(paths)}):")
-            details += [f"  {p}" for p in paths[:MAX_LISTED]]
-            if len(paths) > MAX_LISTED:
-                details.append(f"  … and {len(paths) - MAX_LISTED} more")
+    details = path_lines(
+        (
+            ("Added", change.add),
+            ("Replaced", change.replace),
+            ("Removed", change.remove),
+            ("Kept", change.keep),
+        )
+    )
     if change.data is not None:
         details += ["", "Code:", change.data.decode("utf-8", errors="replace")]
     return question, "\n\n".join(lines), "\n".join(details)  # one paragraph per point

@@ -1,4 +1,4 @@
-"""Unpack a downloaded plugin archive safely on the PC (B-08). Nothing here touches the reader.
+"""Unpack downloaded archives safely on the PC (B-06, B-08). Nothing here touches the reader.
 
 A plugin zip is third-party data. It is opened in memory and only the one plugin folder in it
 is written, file by file, into a staging folder on the PC; :mod:`kodesk.core.installer` copies
@@ -9,6 +9,10 @@ exactly one folder holding ``main.lua`` and ``_meta.lua``.
 
 Layouts seen on GitHub (2026-11): a release asset holds ``x.koplugin/…``; a codeload archive
 holds ``<repo>-<ref>/…`` with the plugin at its root, or ``<repo>-<ref>/x.koplugin/…``.
+
+A KOReader release zip (:func:`stage_release`) is unpacked whole, with the same checks, but only
+the paths its caller accepts (e.g. ``applications/koreader/`` on a PocketBook); its own file list
+``ota/package.index`` must name exactly the files in the archive.
 """
 
 from __future__ import annotations
@@ -18,12 +22,14 @@ import io
 import re
 import stat
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 MAX_MEMBERS = 5000
 MAX_UNPACKED = 200 * 2**20
+RELEASE_MAX_UNPACKED = 600 * 2**20  # the PocketBook release unpacks to 87 MB (v2026.07.1)
+INDEX = "ota/package.index"
 CHUNK = 1 << 20
 PLUGIN_SUFFIX = ".koplugin"
 _PLUGIN_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -32,7 +38,7 @@ _FAT_FORBIDDEN = re.compile(r'[<>:"|?*\\\x00-\x1f]')
 
 
 class ArchiveError(Exception):
-    """The archive is not a single, safe KOReader plugin."""
+    """The archive is not what it should be (one safe plugin, or a KOReader release)."""
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,15 @@ class StagedPlugin:
     @property
     def folder_name(self) -> str:
         return self.name + PLUGIN_SUFFIX
+
+
+@dataclass(frozen=True)
+class StagedRelease:
+    """A KOReader release unpacked on the PC, laid out as on the reader's volume."""
+
+    folder: Path  # the staging folder; files at their volume-relative paths below it
+    files: Mapping[str, str]  # volume-relative path -> SHA-256
+    sizes: Mapping[str, int]  # volume-relative path -> bytes
 
 
 def safe_name(name: str) -> str:
@@ -79,7 +94,9 @@ def _check_type(info: zipfile.ZipInfo) -> None:
         raise ArchiveError(f"special file in the archive: {info.filename!r}")
 
 
-def _checked_members(archive: zipfile.ZipFile) -> dict[PurePosixPath, zipfile.ZipInfo]:
+def _checked_members(
+    archive: zipfile.ZipFile, max_unpacked: int = MAX_UNPACKED
+) -> dict[PurePosixPath, zipfile.ZipInfo]:
     infos = archive.infolist()
     if len(infos) > MAX_MEMBERS:
         raise ArchiveError(f"more than {MAX_MEMBERS} files in the archive")
@@ -96,8 +113,8 @@ def _checked_members(archive: zipfile.ZipFile) -> dict[PurePosixPath, zipfile.Zi
             seen.add(folded)
             files[path] = info
             total += info.file_size
-    if total > MAX_UNPACKED:
-        raise ArchiveError(f"more than {MAX_UNPACKED // 2**20} MB unpacked")
+    if total > max_unpacked:
+        raise ArchiveError(f"more than {max_unpacked // 2**20} MB unpacked")
     return files
 
 
@@ -114,6 +131,34 @@ def _plugin_root(files: Mapping[PurePosixPath, zipfile.ZipInfo]) -> PurePosixPat
         found = ", ".join(r.as_posix() or "(top)" for r in roots)
         raise ArchiveError(f"several plugins in one archive: {found}")
     return roots[0]
+
+
+class _Budget:
+    """Bytes still allowed to be unpacked; the sizes in a zip's header can lie."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = self.left = limit
+
+    def take(self, size: int) -> None:
+        self.left -= size
+        if self.left < 0:
+            raise ArchiveError(f"more than {self.limit // 2**20} MB unpacked")
+
+
+def _copy(
+    archive: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path | None, budget: _Budget
+) -> str:
+    """Unpack one member to the new file ``target`` (or only hash it); its SHA-256."""
+    sha = hashlib.sha256()
+    if target is not None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    with archive.open(info) as source, target.open("xb") if target else io.BytesIO() as out:
+        while chunk := source.read(CHUNK):
+            budget.take(len(chunk))
+            sha.update(chunk)
+            if target is not None:
+                out.write(chunk)
+    return sha.hexdigest()
 
 
 def plugin_name(root: PurePosixPath, repo: str) -> str:
@@ -135,24 +180,92 @@ def stage_plugin(data: bytes, repo: str, staging: Path) -> StagedPlugin:
             folder = staging / (name + PLUGIN_SUFFIX)
             folder.mkdir(parents=True)
             hashes: dict[str, str] = {}
-            budget = MAX_UNPACKED
+            budget = _Budget(MAX_UNPACKED)
             for path, info in sorted(files.items()):
                 if root.parts and path.parts[: len(root.parts)] != root.parts:
                     continue
                 relative = PurePosixPath(*path.parts[len(root.parts) :]).as_posix()
-                target = folder / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                sha = hashlib.sha256()
-                with archive.open(info) as source, target.open("xb") as out:
-                    while chunk := source.read(CHUNK):
-                        budget -= len(chunk)
-                        if budget < 0:  # sizes in the header can lie
-                            raise ArchiveError(f"more than {MAX_UNPACKED // 2**20} MB unpacked")
-                        sha.update(chunk)
-                        out.write(chunk)
-                hashes[relative] = sha.hexdigest()
+                hashes[relative] = _copy(archive, info, folder / relative, budget)
     except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError) as error:
         raise ArchiveError(f"the download is not a readable zip archive ({error})") from error
     except (FileExistsError, NotADirectoryError) as error:  # a file and a folder of one name
         raise ArchiveError(f"conflicting names in the archive ({error.filename})") from error
     return StagedPlugin(name, folder, hashes)
+
+
+def index_paths(text: str) -> list[str]:
+    """The paths in a KOReader ``ota/package.index``, relative to the volume.
+
+    Older indexes start each line with ``../``; KOReader's own update strips it the same way
+    (``sed 's,^../,,'`` in ``platform/pocketbook/koreader.app``).
+    """
+    paths = []
+    for line in text.splitlines():
+        path = line.strip().removeprefix("../")
+        if not path:
+            continue
+        if path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/")):
+            raise ArchiveError(f"unsafe path in {INDEX}: {line[:80]!r}")
+        for part in path.split("/"):
+            safe_name(part)
+        paths.append(path)
+    return paths
+
+
+def _release_members(
+    archive: zipfile.ZipFile, accepted: tuple[str, ...], skipped: tuple[str, ...]
+) -> Iterator[tuple[str, zipfile.ZipInfo]]:
+    """Members a caller accepts (prefix ``x/`` or exact name); skipped ones are left out;
+    anything else in the archive refuses it."""
+    for path, info in sorted(_checked_members(archive, RELEASE_MAX_UNPACKED).items()):
+        name = path.as_posix()
+        if name.startswith(skipped):
+            continue
+        if not any(name == a or (a.endswith("/") and name.startswith(a)) for a in accepted):
+            raise ArchiveError(f"unexpected file in the KOReader release: {name!r}")
+        yield name, info
+
+
+def stage_release(
+    archive_path: Path, staging: Path, accepted: tuple[str, ...], skipped: tuple[str, ...]
+) -> StagedRelease:
+    """Unpack the release at ``archive_path`` into the new folder ``staging`` and check that
+    its ``ota/package.index`` names exactly its files."""
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            staging.mkdir(parents=True)
+            budget = _Budget(RELEASE_MAX_UNPACKED)
+            hashes: dict[str, str] = {}
+            sizes: dict[str, int] = {}
+            for name, info in _release_members(archive, accepted, skipped):
+                hashes[name] = _copy(archive, info, staging / name, budget)
+                sizes[name] = (staging / name).stat().st_size
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError) as error:
+        raise ArchiveError(f"the download is not a readable zip archive ({error})") from error
+    except (FileExistsError, NotADirectoryError) as error:
+        raise ArchiveError(f"conflicting names in the archive ({error.filename})") from error
+    indexes = [n for n in hashes if n.endswith("/" + INDEX)]
+    if len(indexes) != 1:
+        raise ArchiveError(f"the release does not hold exactly one {INDEX}")
+    listed = index_paths((staging / indexes[0]).read_text(encoding="utf-8", errors="replace"))
+    if sorted(listed) != sorted(hashes):
+        differ = sorted(set(listed) ^ set(hashes))
+        raise ArchiveError(
+            f"{INDEX} in the release does not match its files: {', '.join(differ[:5])}"
+        )
+    return StagedRelease(staging, hashes, sizes)
+
+
+def release_hashes(
+    archive_path: Path, accepted: tuple[str, ...], skipped: tuple[str, ...]
+) -> dict[str, str]:
+    """SHA-256 of every accepted file in a release zip, without unpacking anything."""
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            budget = _Budget(RELEASE_MAX_UNPACKED)
+            return {
+                name: _copy(archive, info, None, budget)
+                for name, info in _release_members(archive, accepted, skipped)
+            }
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError) as error:
+        raise ArchiveError(f"the download is not a readable zip archive ({error})") from error

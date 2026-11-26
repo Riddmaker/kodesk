@@ -14,24 +14,27 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox, QSlider, QToolButton
+from PySide6.QtWidgets import QApplication, QDialog, QSlider, QToolButton
 
 from kodesk.core import catalogue as cat
-from kodesk.core import healthcheck
+from kodesk.core import healthcheck, update
 from kodesk.core.install import find_install
 from kodesk.core.records import Records
 from kodesk.ui.app import MainWindow, reader_context
 from kodesk.ui.changes import prepare_entry
 from kodesk.ui.garage import View
+from kodesk.ui.koupdate import UpdateDialog
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests.conftest import (  # pylint: disable=wrong-import-position
     FakeGitHub,
     fake_catalogue,
     make_pocketbook,
+    make_reader,
     plugin_files,
     plugin_zip,
 )
+from tests.test_update import EDITED, koreader_github  # pylint: disable=wrong-import-position
 
 
 def main(argv: list[str]) -> int:
@@ -76,6 +79,7 @@ def main(argv: list[str]) -> int:
         store_shot(app, window, out, suffix)
         install_preview_shot(app, window, out, suffix)
         installed_shot(app, window, out, suffix)
+        koreader_update_shot(app, window, out, suffix)
         window.close()
     return 0
 
@@ -85,7 +89,7 @@ def grab_modal(app: QApplication, path: Path, tries: int = 50) -> None:
 
     def attempt(left: int) -> None:
         box = app.activeModalWidget()
-        if isinstance(box, QMessageBox):
+        if isinstance(box, QDialog):
             app.processEvents()
             box.grab().save(str(path))
             box.reject()
@@ -177,9 +181,27 @@ def installed_shot(app: QApplication, window: MainWindow, out: Path, suffix: str
     (patches / "2-reader-footer-tweak.lua").write_text("-- fake\n")
     (patches / "footer-old.lua").write_text("-- fake\n")
     window.installed.set_install(install)
+    # What "Check for updates" says on the owner's reader (v2026.07.2 is a tag, not a release).
+    window.installed.set_koreader_status(update.UpToDate("v2026.07.2", "v2026.07.1").text)
     window.tabs.setCurrentWidget(window.installed)
     app.processEvents()
     window.grab().save(str(out / f"installed{suffix}.png"))
+
+
+def koreader_update_shot(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:
+    """The KOReader update preview: a fake reader one release behind, one file edited by the
+    user (fake GitHub, cancelled: nothing is written)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        koreader = make_reader(root / "PB634K3", "pocketbook")
+        (root / "PB634K3" / EDITED).write_text("/* mine */\n")
+        github = koreader_github(root)
+        install = find_install(koreader)
+        plan = update.prepare(install, github, github.save, root / "staging", lambda: False)
+        assert isinstance(plan, update.UpdatePlan)
+        dialog = UpdateDialog(plan, window)
+        grab_modal(app, out / f"koreader-update{suffix}.png")
+        assert dialog.exec() == QDialog.DialogCode.Rejected
 
 
 if __name__ == "__main__":

@@ -246,7 +246,8 @@ def plan_remove(koreader_dir: Path, kind: Kind, name: str, record: Record | None
     return Change(Action.REMOVE, kind, name, target, remove=files, notes=notes)
 
 
-def _write_file(target: Path, data: bytes | Path) -> None:
+def write_file(target: Path, data: bytes | Path) -> None:
+    """Write ``data`` (bytes, or a file to copy) beside ``target``, then replace it (vfat)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(target.name + TEMP_SUFFIX)
     if isinstance(data, Path):
@@ -285,13 +286,13 @@ def apply(store: SnapshotStore, koreader_dir: Path, change: Change, records: Rec
             if change.kind is Kind.PATCH:
                 if change.data is None:
                     raise InstallerError("no patch content")
-                _write_file(target, change.data)
+                write_file(target, change.data)
                 expected = hashlib.sha256(change.data).hexdigest()
             else:
                 if change.source is None or change.record is None:
                     raise InstallerError("no staged plugin")
                 relative = path.removeprefix(change.target + "/")
-                _write_file(target, change.source / relative)
+                write_file(target, change.source / relative)
                 expected = change.record.files[relative]
             if file_sha256(target) != expected:
                 raise OSError(f"{path} reads back differently after writing")

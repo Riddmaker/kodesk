@@ -59,6 +59,12 @@ class KOReaderInstall:
         )
 
 
+def volume_root(install: KOReaderInstall) -> Path:
+    """The reader's USB volume the KOReader folder lives on (PocketBook: two levels up)."""
+    relative = {"pocketbook": 2, "kobo": 2, "kindle": 1}.get(install.platform, 1)
+    return install.root.parents[relative - 1]
+
+
 def read_settings_file(path: Path) -> SettingsDocument:
     """Parse a settings file; a missing file is an empty table, an oversized one an error."""
     if not path.is_file():

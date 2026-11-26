@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -35,17 +35,22 @@ def human_size(size: int) -> str:
     return f"{size / 2**20:.0f} MB"
 
 
-def plan_text(plan: RestorePlan) -> str:
-    """The preview: what a restore writes back and removes (names, then a count)."""
+def path_lines(groups: Iterable[tuple[str, Sequence[str]]]) -> list[str]:
+    """Preview details: a title per non-empty group, its first paths, then a count."""
     lines = []
-    for title, paths in (("Written back", plan.write), ("Removed", plan.remove)):
+    for title, paths in groups:
         if not paths:
             continue
         lines.append(f"{title} ({len(paths)}):")
         lines += [f"  {p}" for p in paths[:MAX_LISTED]]
         if len(paths) > MAX_LISTED:
             lines.append(f"  … and {len(paths) - MAX_LISTED} more")
-    return "\n".join(lines)
+    return lines
+
+
+def plan_text(plan: RestorePlan) -> str:
+    """The preview: what a restore writes back and removes (names, then a count)."""
+    return "\n".join(path_lines((("Written back", plan.write), ("Removed", plan.remove))))
 
 
 def busy[T](action: Callable[[], T]) -> T:

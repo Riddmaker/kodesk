@@ -205,3 +205,28 @@ def test_device_id_with_the_volume_serial() -> None:
     assert (
         device_id("PBVerseProColor", "PB634K3", "1234-ABCD") == "PBVerseProColor-PB634K3-1234-ABCD"
     )
+
+
+def test_the_launcher_beside_the_folder_is_kept_and_restored(
+    reader: Path, store: SnapshotStore
+) -> None:
+    launcher = reader.parent / "koreader.app"
+    original = launcher.read_bytes()
+    taken = store.take(reader, outside=("koreader.app",))
+    assert [e.path for e in taken.outside] == ["../koreader.app"]
+    launcher.write_bytes(b"broken")
+    store.restore(reader, store.load(taken.id))
+    assert launcher.read_bytes() == original
+
+
+@pytest.mark.parametrize("path", ["../outside.txt", "../../koreader.app", "../koreader.app/x"])
+def test_tampered_manifest_names_only_known_files_beside(
+    reader: Path, store: SnapshotStore, path: str
+) -> None:
+    taken = store.take(reader, outside=("koreader.app",))
+    manifest = store.manifests / f"{taken.id}.json"
+    data = json.loads(manifest.read_text())
+    data["outside"][0][0] = path
+    manifest.write_text(json.dumps(data))
+    with pytest.raises(SnapshotError):
+        store.load(taken.id)
