@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -25,7 +25,9 @@ from PySide6.QtGui import (
     QTextLayout,
     QTextOption,
 )
+from PySide6.QtSvg import QSvgRenderer
 
+from kodesk.core.icons import MENU_TABS as MENU_TAB_ICONS
 from kodesk.core.layout import BookLayout, scale_by_size
 from kodesk.core.menus import FileList, TouchMenu, file_list, touch_menu
 from kodesk.core.statusbar import BATTERY_SIGN, Footer, Sample, footer_text
@@ -314,6 +316,7 @@ def _canvas(size: tuple[int, int], night: bool) -> tuple[QImage, QPainter, QColo
 
 
 MENU_TABS = ("☰", "Aa", "⚙", "✎", "⌕", "▤", "≡")  # stand-ins for the appbar.* icons
+TAB_ICONS = MENU_TAB_ICONS
 MENU_ITEMS = (  # the navigation tab of a reflowable book (reader_menu_order.lua navi)
     ("Table of contents", False),
     ("Bookmarks", False),
@@ -326,15 +329,57 @@ MENU_ITEMS = (  # the navigation tab of a reflowable book (reader_menu_order.lua
 )
 
 
-def _paint_menu_tabs(painter: QPainter, ink: QColor, menu: TouchMenu, width: int) -> None:
+def load_icon(path: Path, size: int, night: bool = False) -> QImage | None:
+    """An icon file from the reader (SVG or PNG) at ``size`` × ``size`` px, or None if Qt
+    cannot read it. QtSvg draws SVG Tiny only: no scripts, no external files."""
+    image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    if path.suffix == ".svg":
+        renderer = QSvgRenderer(str(path))
+        if not renderer.isValid():
+            return None
+        painter = QPainter(image)
+        renderer.render(painter, QRectF(0, 0, size, size))
+        painter.end()
+    else:
+        picture = QImage(str(path))
+        if picture.isNull():
+            return None
+        image = picture.scaled(
+            QSize(size, size),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ).convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    if night:  # KOReader inverts the whole screen in night mode
+        image.invertPixels(QImage.InvertMode.InvertRgb)
+    return image
+
+
+def tab_bar_rect(size: tuple[int, int]) -> QRect:
+    """Where the menu's tab icons are, in screen pixels (for the Garage's clickable spot)."""
+    menu = touch_menu(*size)
+    return QRect(0, menu.border, size[0], menu.bar_h)
+
+
+def _paint_menu_tabs(
+    painter: QPainter,
+    ink: QColor,
+    menu: TouchMenu,
+    width: int,
+    icons: list[QImage | None],
+) -> None:
     """The tab bar; the first tab (navigation) is selected: no line under it, separators
-    left and right of it (touchmenu.lua:341-422)."""
+    left and right of it (touchmenu.lua:341-422). Real icons where loaded, plain signs
+    otherwise."""
     top = menu.border
     cell = 2 * menu.tab_pad + menu.icon
     painter.setFont(_font("Noto Sans", round(menu.icon * 0.6), QFont.StyleHint.SansSerif))
     painter.setPen(ink)
-    for index, glyph in enumerate(MENU_TABS):
+    for index, (icon, glyph) in enumerate(zip(icons, MENU_TABS, strict=True)):
         x = menu.tab_x(index, len(MENU_TABS), width)
+        if icon is not None:
+            painter.drawImage(QPointF(x + menu.tab_pad, top + (menu.bar_h - menu.icon) / 2), icon)
+            continue
         painter.drawText(QRectF(x, top, cell, menu.bar_h), int(Qt.AlignmentFlag.AlignCenter), glyph)
     selected = menu.tab_x(0, len(MENU_TABS), width)
     line_y = top + menu.bar_h
@@ -344,9 +389,15 @@ def _paint_menu_tabs(painter: QPainter, ink: QColor, menu: TouchMenu, width: int
         painter.fillRect(max(0, x), top, menu.tab_sep, menu.bar_h, ink)
 
 
-def render_menu(size: tuple[int, int], night: bool, page: QImage | None = None) -> QImage:
+def render_menu(
+    size: tuple[int, int],
+    night: bool,
+    page: QImage | None = None,
+    icons: dict[str, Path] | None = None,
+) -> QImage:
     """KOReader's top menu (TouchMenu) over the book page, measured from touchmenu.lua
-    (kodesk.core.menus). Tab icons are drawn as plain signs (the real ones are SVG files)."""
+    (kodesk.core.menus). Tab icons: the reader's own files where ``icons`` names them
+    (kodesk.core.icons), plain signs otherwise."""
     width, height = size
     image, painter, ink = _canvas(size, night)
     if page is not None:
@@ -356,7 +407,11 @@ def render_menu(size: tuple[int, int], night: bool, page: QImage | None = None) 
     painter.fillRect(0, 0, width, menu_h, QColor("black") if night else QColor("white"))
     painter.fillRect(0, 0, width, menu.border, ink)
     painter.fillRect(0, menu_h - menu.border, width, menu.border, ink)
-    _paint_menu_tabs(painter, ink, menu, width)
+    paths = icons or {}
+    tab_icons = [
+        load_icon(paths[name], menu.icon, night) if name in paths else None for name in TAB_ICONS
+    ]
+    _paint_menu_tabs(painter, ink, menu, width, tab_icons)
     line_y = menu.border + menu.bar_h
     # Items: checkmark column, text, "▸" for submenus.
     font = _font("Noto Sans", menu.item_font_px, QFont.StyleHint.SansSerif)

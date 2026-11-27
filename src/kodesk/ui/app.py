@@ -22,8 +22,9 @@ from PySide6.QtWidgets import (
 )
 
 from kodesk import APP_ID, APP_NAME, __version__
-from kodesk.core import catalogue, healthcheck, net
+from kodesk.core import catalogue, healthcheck, icons, net
 from kodesk.core.devices import DEVICES
+from kodesk.core.icons import icon_file
 from kodesk.core.install import InstallError, KOReaderInstall, find_install, volume_root
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.settings_write import write_settings
@@ -63,6 +64,12 @@ def _library_entries(home: Path) -> tuple[str, ...]:
     return tuple(f"{p.name}/" if p.is_dir() else p.stem for p in entries[:MAX_LIBRARY_ENTRIES])
 
 
+def menu_icons(koreader_root: Path) -> dict[str, Path]:
+    """The menu tab icons as KOReader finds them on the reader (read-only)."""
+    found = {name: icon_file(koreader_root, name) for name in icons.MENU_TABS}
+    return {name: path for name, path in found.items() if path is not None}
+
+
 def reader_context(install: KOReaderInstall) -> ReaderContext:
     """Read everything the garage shows from a connected reader."""
     if install.device is None:
@@ -84,6 +91,7 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
         library_entries=_library_entries(home_path),
         sleep_image=sleep if sleep.is_file() else None,
         plugins=install.plugins(),
+        icons=menu_icons(install.root),
         source_label=f"KOReader {install.version or '?'} on {volume}",
     )
 
@@ -196,6 +204,7 @@ class MainWindow(QMainWindow):
             self.tabs.removeTab(self.tabs.indexOf(old))
             old.deleteLater()
         self.tabs.insertTab(0, self.garage, "Tuning-&Garage")
+        self.garage.storeRequested.connect(self.show_in_store)
         self.tabs.setCurrentIndex(0)
         self.changes.install = install
         self.koupdate.install = install
@@ -208,6 +217,11 @@ class MainWindow(QMainWindow):
             if install.platform in PLATFORMS:
                 self.garage.set_sleep_writer(lambda data: self._write_sleep(install, data))
             QTimer.singleShot(0, self.check_health)
+
+    def show_in_store(self, search: str, select: str) -> None:
+        """The Store with ``search`` filled in (from a locked place in the Garage)."""
+        self.tabs.setCurrentWidget(self.store)
+        self.store.search_for(search, select)
 
     def show_reader(self, install: KOReaderInstall | None) -> str | None:
         """Show ``install`` (None: the demo reader); an error message if it cannot be shown."""

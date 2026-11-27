@@ -8,7 +8,7 @@ write").
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from kodesk.core.devices import Control, DeviceModel, Face
+from kodesk.core.extensions import Area, Extension, installed_for
 from kodesk.core.layout import (
     DEFAULT_B_MARGIN,
     DEFAULT_H_MARGINS,
@@ -64,13 +65,15 @@ from kodesk.core.statusbar import (
     footer_with,
     header_key,
 )
-from kodesk.ui.device_view import DeviceView
+from kodesk.ui.device_view import DeviceView, Spot
+from kodesk.ui.extensions import ExtensionLock
 from kodesk.ui.screen import (
     BookRenderer,
     fit_picture,
     render_library,
     render_menu,
     render_sleep,
+    tab_bar_rect,
 )
 
 
@@ -105,6 +108,7 @@ class ReaderContext:
     sleep_image: Path | None = None
     source_label: str = "demo (no reader connected)"
     plugins: tuple[str, ...] = ()  # installed plugin names, e.g. "pbfixes"
+    icons: dict[str, Path] = field(default_factory=dict)  # icon name → file on the reader
 
 
 def _segmented(labels: list[str], parent: QWidget) -> tuple[QWidget, QButtonGroup]:
@@ -143,22 +147,29 @@ class SliderSpec:
 
 
 @dataclass(frozen=True)
-class KeyUnlock:
-    """A plugin that makes a locked hardware key configurable, and the setting it reads."""
+class KeyOption:
+    """A hardware-key option that an extension on kodesk's list adds (B-23)."""
 
-    plugin: str  # plugins/<plugin>.koplugin
+    area: Area
     label: str
-    path: KeyPath
-    default: bool  # the plugin's value while the key is absent
+    path: KeyPath  # one of the extension's keys (kodesk.core.extensions)
+    default: bool  # the extension's value while the key is absent
 
 
-# pbfixes.koplugin 0.4.1 (github.com/glaucon1984/pbfixes.koplugin, main.lua):
-# HOME_SETTING = "pbfixes_home_back", read with G_reader_settings:nilOrTrue (absent = on).
-KEY_UNLOCKS = {
-    "Home": KeyUnlock(
-        "pbfixes", "Home button acts as Back (pbfixes plugin)", ("pbfixes_home_back",), True
-    ),
+# pbfixes reads its key with G_reader_settings:nilOrTrue (absent = on).
+KEY_OPTIONS = {
+    "Home": KeyOption(Area.HOME_KEY, "Home button acts as Back", ("pbfixes_home_back",), True),
 }
+HOME_LOCK_DETAILS = (
+    "KOReader has no setting for the Home button on PocketBook (its Hotkeys plugin needs a "
+    "keyboard). An extension can make Home act as Back; once one is installed on the reader, "
+    "this option works here. The reader's own settings must leave a single press of Home to "
+    "KOReader."
+)
+ICONS_LOCK_DETAILS = (
+    "KOReader draws its own icon set. An extension can put other icon packs on the reader; "
+    "kodesk then draws the icons your reader really shows."
+)
 
 
 def key_description(control: Control, plugins: tuple[str, ...] = ()) -> str:
@@ -169,18 +180,15 @@ def key_description(control: Control, plugins: tuple[str, ...] = ()) -> str:
             "assigned to them in KOReader on this device."
         )
     if control.koreader_key == "Home":
-        if "pbfixes" in plugins:
+        extension = installed_for(Area.HOME_KEY, plugins)
+        if extension is not None:
             return (
-                "In KOReader: opens the library (file browser). <b>Unlocked</b> by the "
-                "pbfixes plugin installed on your reader: with the option on, Home acts as "
-                "Back instead (closes menus, goes up a folder)."
+                "In KOReader: opens the library (file browser). <b>Unlocked</b> by "
+                f"{extension.title} on your reader: {extension.unlocks}."
             )
         return (
             "In KOReader: opens the library (file browser). <b>Locked:</b> KOReader has no "
-            "setting for this button on PocketBook (its Hotkeys plugin needs a keyboard). "
-            "The plugin <i>pbfixes</i> can make Home act as Back; once it is installed on "
-            "the reader, kodesk unlocks this button here. The reader's own settings must "
-            "leave a single press of Home to KOReader."
+            "setting for this button on PocketBook."
         )
     if control.koreader_key == "Menu":
         return (
@@ -206,11 +214,14 @@ class KeyPanel(QGroupBox):
         self.invert.setObjectName("invert-page-turn")
         self.invert.setVisible(False)
         layout.addWidget(self.invert)
-        self.unlock = QCheckBox(self)  # the option a plugin adds to a locked key
+        self.unlock = QCheckBox(self)  # the option an extension adds to a locked key
         self.unlock.setObjectName("key-unlock")
         self.unlock.setVisible(False)
         layout.addWidget(self.unlock)
-        self.current_unlock: KeyUnlock | None = None
+        self.lock = ExtensionLock(Area.HOME_KEY, HOME_LOCK_DETAILS, self)
+        self.lock.setVisible(False)
+        layout.addWidget(self.lock)
+        self.current_unlock: KeyOption | None = None
 
     def show_control(
         self,
@@ -226,14 +237,21 @@ class KeyPanel(QGroupBox):
             f"{key_description(control, plugins)}"
         )
         self.invert.setVisible(control.koreader_key in PAGE_KEYS)
-        unlock = KEY_UNLOCKS.get(control.koreader_key or "")
-        self.current_unlock = unlock if unlock and unlock.plugin in plugins else None
-        self.unlock.setVisible(self.current_unlock is not None)
-        if self.current_unlock is not None:
-            value = value_of(self.current_unlock.path)
+        option = KEY_OPTIONS.get(control.koreader_key or "")
+        installed = installed_for(option.area, plugins) if option else None
+        self.current_unlock = option if installed is not None else None
+        # Possible with an extension: the option is shown greyed, with the lock note.
+        self.unlock.setVisible(option is not None)
+        self.unlock.setEnabled(installed is not None)
+        self.lock.setVisible(option is not None and installed is None)
+        if option is not None:
+            value = value_of(option.path) if installed is not None else None
             self.unlock.blockSignals(True)  # showing the state is not a change
-            self.unlock.setText(self.current_unlock.label)
-            self.unlock.setChecked(self.current_unlock.default if value is None else value is True)
+            self.unlock.setText(option.label)
+            self.unlock.setToolTip("" if installed else HOME_LOCK_DETAILS)
+            self.unlock.setChecked(
+                installed is not None and (option.default if value is None else value is True)
+            )
             self.unlock.blockSignals(False)
 
 
@@ -264,10 +282,11 @@ class ChangesBox(QGroupBox):
         return [self.list.item(i).text() for i in range(self.list.count())]
 
 
-class TuningGarage(QWidget):
+class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # widgets
     """The Tuning-Garage: the drawn reader in the middle, its settings around it."""
 
     settingsChanged = Signal()
+    storeRequested = Signal(str, str)  # Store search text, entry name to select
 
     def __init__(self, context: ReaderContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -296,7 +315,13 @@ class TuningGarage(QWidget):
         self.key_panel.invert.setChecked(self._value(INVERT_KEY) is True)
         self.key_panel.invert.toggled.connect(self._set_invert)
         self.key_panel.unlock.toggled.connect(self._set_unlocked_option)
+        self.key_panel.lock.storeRequested.connect(self.storeRequested)
+        self.device_view.spotClicked.connect(self.select_spot)
+        self.device_view.set_locked_keys(
+            {"home"} if installed_for(Area.HOME_KEY, context.plugins) is None else set()
+        )
         self.changes_box = ChangesBox(self)
+        self.icons_lock = ExtensionLock(Area.ICONS, ICONS_LOCK_DETAILS, self)
         self.sleep_panel.imageDropped.connect(self._sleep_dropped)
         self.sleep_panel.write_button.clicked.connect(self.write_sleep_picture)
 
@@ -342,12 +367,7 @@ class TuningGarage(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(book)
         self.panels.addWidget(scroll)
-        self.panels.addWidget(
-            self._info_panel(
-                "KOReader's top menu over the page, measured from KOReader's own code "
-                "(touchmenu.lua). The tab icons are drawn as plain signs."
-            )
-        )
+        self.panels.addWidget(self._menu_panel())
         self.panels.addWidget(self._library_panel())
         self.panels.addWidget(self.sleep_panel)
         self.changes_box.write_button.clicked.connect(self.write_changes)
@@ -674,6 +694,68 @@ class TuningGarage(QWidget):
         label.setAlignment(Qt.AlignmentFlag.AlignTop)
         return label
 
+    def _icons_extension(self) -> Extension | None:
+        return installed_for(Area.ICONS, self.context.plugins)
+
+    def _menu_panel(self) -> QWidget:
+        """The Menu view: what is drawn, and the icons (locked without an icon extension)."""
+        panel = QGroupBox("Menu", self)
+        panel.setObjectName("menu-box")
+        layout = QVBoxLayout(panel)
+        drawn = (
+            "The tab icons are the files on your reader (its icons folder first, as KOReader does)."
+            if self.context.icons
+            else "The tab icons are drawn as plain signs (no icon files from a reader)."
+        )
+        about = QLabel(
+            "KOReader's top menu over the page, measured from KOReader's own code "
+            f"(touchmenu.lua). {drawn}",
+            panel,
+        )
+        about.setWordWrap(True)
+        layout.addWidget(about)
+        extension = self._icons_extension()
+        pack = QLabel(panel)
+        pack.setObjectName("icon-pack")
+        pack.setWordWrap(True)
+        if extension is None:
+            pack.setText("Icon pack: KOReader's own")
+            pack.setEnabled(False)  # possible with an extension: greyed
+            pack.setToolTip(ICONS_LOCK_DETAILS)
+        else:
+            pack.setText(f"Icon pack: {extension.unlocks}.")
+        layout.addWidget(pack)
+        self.icons_lock.update_for(self.context.plugins)
+        self.icons_lock.storeRequested.connect(self.storeRequested)
+        layout.addWidget(self.icons_lock)
+        layout.addStretch(1)
+        return panel
+
+    def select_spot(self, spot_id: str) -> None:
+        """A part of the drawn screen was clicked or chosen by keyboard."""
+        self.device_view.select_spot(spot_id)
+        if spot_id == "icons":
+            locked = self._icons_extension() is None
+            self.status.setText(
+                "Tab icons: " + ("needs an extension (see the panel)." if locked else "yours.")
+            )
+            target = self.icons_lock.buttons[0] if locked else None
+            if target is not None:
+                target.setFocus()
+
+    def _spots(self) -> list[Spot]:
+        """The clickable parts of the drawn screen in the current view."""
+        if self.view is View.MENU:
+            return [
+                Spot(
+                    "icons",
+                    "Tab icons",
+                    tab_bar_rect(self.context.device.screen_px),
+                    locked=self._icons_extension() is None,
+                )
+            ]
+        return []
+
     def _library_panel(self) -> QWidget:
         text = (
             "Your book folder as KOReader lists it in the classic list, measured from "
@@ -758,7 +840,7 @@ class TuningGarage(QWidget):
         elif control_id == "home" and self._home_is_back():
             if self.view is View.MENU:
                 self.set_view(View.BOOK)
-            self.status.setText("Home acts as Back (pbfixes plugin).")
+            self.status.setText("Home acts as Back (extension on your reader).")
             return
         elif control_id == "home":
             self.set_view(View.LIBRARY)
@@ -767,11 +849,12 @@ class TuningGarage(QWidget):
         self.refresh()
 
     def _home_is_back(self) -> bool:
-        unlock = KEY_UNLOCKS["Home"]
-        if unlock.plugin not in self.context.plugins:
+        option = KEY_OPTIONS["Home"]
+        extension = installed_for(option.area, self.context.plugins)
+        if extension is None:
             return False
-        value = self._value(unlock.path)
-        return unlock.default if value is None else value is True
+        value = self._value(option.path)
+        return option.default if value is None else value is True
 
     def long_press_key(self, control_id: str) -> None:
         """Simulate holding a key (about 2 s); only Menu | On/Off reacts, in the firmware."""
@@ -811,7 +894,7 @@ class TuningGarage(QWidget):
         if self.view is View.BOOK:
             return self._book().render(self.page)
         if self.view is View.MENU:
-            return render_menu(size, night, self._book().render(self.page))
+            return render_menu(size, night, self._book().render(self.page), self.context.icons)
         if self.view is View.LIBRARY:
             entries = list(self.context.library_entries) or ["(no reader connected)"]
             return render_library(size, night, entries, self.library_page)
@@ -822,6 +905,7 @@ class TuningGarage(QWidget):
     def refresh(self) -> None:
         """Redraw the screen and the list of pending changes."""
         self.device_view.set_screen(self.screen_image())
+        self.device_view.set_spots(self._spots())
         box = self.changes_box
         box.list.clear()
         box.write_button.setEnabled(box.writer is not None and bool(self.changed()))

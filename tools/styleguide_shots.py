@@ -77,6 +77,10 @@ def main(argv: list[str]) -> int:
         garage.write_changes()
         garage.select_key("home")
         shot("garage-home-locked")
+        garage.set_view(View.MENU)
+        garage.select_spot("icons")
+        shot("garage-icons-locked")
+        garage.set_view(View.BOOK)
         for side in ("Bottom edge", "Front"):  # click the switch like a user would
             button = garage.findChild(QToolButton, f"seg-{side}")
             assert button is not None

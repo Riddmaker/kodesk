@@ -189,7 +189,7 @@ def test_buttons_have_keys(
     window: tuple[MainWindow, Path, FakeGitHub], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     main, koreader, _github = window
-    Dialogs(monkeypatch, confirm=False)  # the keys open the previews; nothing is written
+    dialogs = Dialogs(monkeypatch, confirm=False)  # the keys open the previews; nothing written
     with qtbot.waitActive(main):
         main.show()
         main.activateWindow()
@@ -204,6 +204,9 @@ def test_buttons_have_keys(
     _select(main, "clock")
     with qtbot.waitSignal(main.store.install_requested):
         qtbot.keyClick(main.store.list, Qt.Key.Key_T, Qt.KeyboardModifier.AltModifier)
+    # The install it starts fails in the background (no fake release); wait for its message,
+    # or it would land in the next test once this test's dialog stand-ins are gone.
+    qtbot.waitUntil(lambda: bool(dialogs.messages))
 
 
 def test_preview_says_when_there_is_no_licence(tmp_path: Path) -> None:

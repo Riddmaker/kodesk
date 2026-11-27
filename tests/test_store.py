@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,11 @@ from PySide6.QtGui import QDesktopServices, QTextDocument
 from pytestqt.qtbot import QtBot
 
 from kodesk.core import catalogue as cat
-from kodesk.core.catalogue import Catalogue, CatalogueError, Entry
+from kodesk.core.catalogue import Catalogue, CatalogueError, Entry, Kind
+from kodesk.core.extensions import NOT_SUPPORTED, SUPPORTED
 from kodesk.ui import store as store_module
 from kodesk.ui.app import MainWindow, demo_context
-from kodesk.ui.store import StorePage, entry_title, open_external
+from kodesk.ui.store import StorePage, entry_title, garage_support, open_external
 from tests.conftest import THIRD_PARTY_PLUGIN, USER_PATCH, fake_catalogue, write_fake_catalogue
 
 
@@ -202,3 +204,22 @@ def test_no_network_before_the_store_tab_opens(
     assert window.store.catalogue is not None and window.store.catalogue.offline
     assert "offline" in window.store.credit.text()
     assert not calls
+
+
+def test_garage_support_badge() -> None:
+    plugin = cat.parse(*fake_catalogue()).entries[0]
+    assert garage_support(plugin) == NOT_SUPPORTED
+    listed = replace(plugin, owner="glaucon1984", repo="pbfixes.koplugin", name="pbfixes")
+    assert garage_support(listed) == SUPPORTED
+    patch = next(e for e in cat.parse(*fake_catalogue()).entries if e.kind is Kind.PATCH)
+    assert garage_support(patch) == ""
+
+
+def test_search_for_fills_in_and_selects(page: tuple[StorePage, Fake]) -> None:
+    store, _fake = page
+    store.kind.setCurrentIndex(2)  # patches only: reset by search_for
+    store.search_for("clock", "readingclock")
+    assert store.search.text() == "clock" and store.kind.currentIndex() == 0
+    current = store.current()
+    assert current is not None and current.name == "readingclock"
+    assert NOT_SUPPORTED in store.details.badges.text()

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from kodesk.core import catalogue as cat
 from kodesk.core.catalogue import Catalogue, Entry, Kind
+from kodesk.core.extensions import NOT_SUPPORTED, SUPPORTED, for_repo
 
 LoadCatalogue = Callable[[], Catalogue]
 FetchText = Callable[[Entry], str]
@@ -100,6 +101,13 @@ def entry_title(entry: Entry) -> str:
     return f"Patch {entry.name}" if entry.kind is Kind.PATCH else entry.name
 
 
+def garage_support(entry: Entry) -> str:
+    """B-23: whether kodesk's Garage can adjust this extension; patches say nothing."""
+    if for_repo(entry.owner, entry.repo) is not None:
+        return SUPPORTED
+    return NOT_SUPPORTED if entry.kind is Kind.PLUGIN else ""
+
+
 def entry_facts(entry: Entry) -> str:
     licence = entry.license or "no licence given"
     parts = [f"{entry.owner}/{entry.repo}", f"★ {entry.stars}", licence]
@@ -152,7 +160,8 @@ class EntryDetails(QWidget):
         badges = ["Installed"] if installed else []
         badges += ["Archived"] if entry.archived else []
         badges.append("Compatibility not declared")
-        self.badges.setText("  ·  ".join(badges))
+        badges.append(garage_support(entry))
+        self.badges.setText("  ·  ".join(b for b in badges if b))
         self.install_button.setText("&Update…" if installed else "Ins&tall…")
         url = html.escape(entry.url, quote=True)
         self.link.setText(f'<a href="{url}">{url}</a>')
@@ -160,7 +169,7 @@ class EntryDetails(QWidget):
         self.readme.setPlainText(f"{entry.description}\n\nLoading the {what}…")
 
 
-class StorePage(QWidget):
+class StorePage(QWidget):  # pylint: disable=too-many-instance-attributes  # widgets
     """Search and filter on top, the list on the left, the selected entry on the right."""
 
     install_requested = Signal(object)  # Entry
@@ -173,6 +182,7 @@ class StorePage(QWidget):
         self._loading = False
         self._texts: dict[str, str] = {}
         self._installed: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
+        self._select = ""  # entry name to select once the list shows it (search_for)
         self._results = Results(self)
         self._results.done.connect(self._finished)
         self._fetch_timer = QTimer(self)
@@ -313,16 +323,32 @@ class StorePage(QWidget):
         self.list.clear()
         for entry in shown:
             mark = "  ✓ installed" if self.installed(entry) else ""
+            if for_repo(entry.owner, entry.repo) is not None:
+                mark += "  · adjustable in the Garage"
             description = entry.description[:MAX_LIST_TEXT]
             if len(entry.description) > MAX_LIST_TEXT:
                 description += "…"
             item = QListWidgetItem(f"{entry_title(entry)}{mark}\n{description}", self.list)
             item.setData(Qt.ItemDataRole.UserRole, entry)
             item.setToolTip(entry.description)
-            if kept is not None and entry.id == kept.id:
+            if self._select and entry.name.lower() == self._select:
+                self.list.setCurrentItem(item)
+                self._select = ""
+            elif kept is not None and entry.id == kept.id and self.list.currentItem() is None:
                 self.list.setCurrentItem(item)  # e.g. after an install: stay on it
         if self.list.currentItem() is None:
             self.show_entry(None)
+
+    def search_for(self, search: str, select: str = "") -> None:
+        """Fill in the search (and select the entry named ``select``), now or once loaded (B-23)."""
+        self._select = select.lower()
+        self.kind.setCurrentIndex(0)
+        self.category.setCurrentIndex(0)
+        if self.search.text() == search:
+            self.refilter()
+        else:
+            self.search.setText(search)  # refilters
+        self.ensure_loaded()
 
     def enter_results(self) -> None:
         """Enter in the search field: go to the first result (keyboard only)."""

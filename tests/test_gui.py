@@ -44,6 +44,7 @@ from kodesk.ui.snapshots import (
     with_snapshot_progress,
 )
 from tests.conftest import make_pocketbook, make_reader
+from tests.test_extensions import SVG
 
 pytestmark = pytest.mark.gui
 
@@ -101,9 +102,69 @@ def test_home_and_menu_are_locked_without_a_plugin(garage: TuningGarage) -> None
     for key in ("home", "menu"):
         garage.select_key(key)
         assert "Locked" in garage.key_panel.info.text()
-        assert not garage.key_panel.unlock.isVisibleTo(garage)
+    garage.select_key("menu")
+    assert not garage.key_panel.unlock.isVisibleTo(garage)
+    assert not garage.key_panel.lock.isVisibleTo(garage)  # no extension can change Menu
     garage.select_key("home")
-    assert "pbfixes" in garage.key_panel.info.text()
+    panel = garage.key_panel
+    # DESIGN rule "Possible with an extension": greyed option, lock note, Store buttons.
+    assert panel.unlock.isVisibleTo(garage) and not panel.unlock.isEnabled()
+    assert panel.lock.isVisibleTo(garage)
+    assert [b.text() for b in panel.lock.buttons] == ["pbfixes → Store"]
+    assert garage.device_view.keys["home"].locked
+    assert not garage.device_view.keys["menu"].locked
+    assert "extension" in garage.device_view.keys["home"].accessibleName()
+
+
+def test_lock_buttons_open_the_store_prefilled(qtbot: QtBot, pocketbook: Path) -> None:
+    window = MainWindow(reader_context(find_install(pocketbook)), offline=True)
+    qtbot.addWidget(window)
+    window.show()
+    window.garage.select_key("home")
+    qtbot.mouseClick(window.garage.key_panel.lock.buttons[0], Qt.MouseButton.LeftButton)
+    assert window.tabs.currentWidget() is window.store
+    assert window.store.search.text() == "pbfixes"
+    window.tabs.setCurrentWidget(window.garage)
+    qtbot.mouseClick(window.garage.key_panel.lock.more, Qt.MouseButton.LeftButton)
+    assert window.store.search.text() == "button"
+
+
+def test_menu_view_draws_the_readers_icons_and_locks_icon_packs(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    reader = make_pocketbook(tmp_path / "PB634K3")
+    stock = reader / "applications/koreader/resources/icons/mdlight"
+    stock.mkdir(parents=True)
+    (stock / "appbar.menu.svg").write_bytes(SVG)
+    context = reader_context(find_install(reader))
+    assert set(context.icons) == {"appbar.menu"}
+    window = MainWindow(context)
+    qtbot.addWidget(window)
+    window.show()
+    garage = window.garage
+    garage.set_view(View.MENU)
+    with_icon = garage.screen_image()
+    spot = garage.device_view.spots["icons"]
+    assert spot.isVisible() and spot.spot.locked  # no icon extension installed
+    assert garage.icons_lock.isVisibleTo(garage)
+    qtbot.mouseClick(spot, Qt.MouseButton.LeftButton)
+    assert spot.selected and "needs an extension" in garage.status.text()
+    garage.context.icons.clear()
+    assert garage.screen_image() != with_icon  # the real icon, not the plain sign
+    garage.set_view(View.BOOK)
+    assert not garage.device_view.spots
+
+
+def test_icon_extension_unlocks_the_icons(qtbot: QtBot, tmp_path: Path) -> None:
+    reader = make_pocketbook(tmp_path / "PB634K3")
+    (reader / "applications/koreader/plugins/iconschanger.koplugin").mkdir(parents=True)
+    window = MainWindow(reader_context(find_install(reader)))
+    qtbot.addWidget(window)
+    window.show()
+    garage = window.garage
+    garage.set_view(View.MENU)
+    assert not garage.device_view.spots["icons"].spot.locked
+    assert not garage.icons_lock.isVisibleTo(garage)
 
 
 def test_pbfixes_plugin_unlocks_home(qtbot: QtBot, tmp_path: Path) -> None:
@@ -116,7 +177,9 @@ def test_pbfixes_plugin_unlocks_home(qtbot: QtBot, tmp_path: Path) -> None:
     garage.select_key("home")
     unlock = garage.key_panel.unlock
     assert "Unlocked" in garage.key_panel.info.text()
-    assert unlock.isVisible() and unlock.isChecked()  # pbfixes: absent key = on
+    assert unlock.isVisible() and unlock.isEnabled() and unlock.isChecked()  # absent = on
+    assert not garage.key_panel.lock.isVisible()
+    assert not garage.device_view.keys["home"].locked
     garage.press_key("menu")
     garage.press_key("home")
     assert current_view(garage) is View.BOOK  # Back closes the menu instead of the library
