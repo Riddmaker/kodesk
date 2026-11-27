@@ -37,9 +37,9 @@ from kodesk.core.install import (
 )
 from kodesk.core.librarymode import LibraryLook, read_look, write_mode
 from kodesk.core.luadump import SettingsDocument
-from kodesk.core.mirror import WifiReader
+from kodesk.core.mirror import MirrorError, WifiReader
 from kodesk.core.settings_write import Changes, write_documents
-from kodesk.core.sleepscreen import PHOTO_DIR, PLATFORMS, SLEEP_LOGO, place_picture
+from kodesk.core.sleepscreen import PHOTO_DIR, PLATFORMS, SLEEP_LOGO, picture_name, place_picture
 from kodesk.core.snapshot import SnapshotStore, device_id, guarded_write
 from kodesk.core.volume import volume_serial
 from kodesk.core.wifi import KeyStore
@@ -49,7 +49,7 @@ from kodesk.ui.installed import InstalledPage
 from kodesk.ui.koupdate import KOReaderUpdater
 from kodesk.ui.readers import Lister, ReaderWatcher, mounted_readers
 from kodesk.ui.screen import load_device_fonts
-from kodesk.ui.snapshots import SnapshotsDialog, with_snapshot_progress
+from kodesk.ui.snapshots import SnapshotsDialog, busy, with_snapshot_progress
 from kodesk.ui.store import StorePage
 from kodesk.ui.wifi import UsbReader, WifiDialog
 from kodesk.ui.wifi_garage import HINT as WIFI_HINT
@@ -273,6 +273,8 @@ class MainWindow(QMainWindow):
             self.remote_garage = remote
             self.garage.set_writer(remote.send_settings, WIFI_HINT)
             self.garage.set_library_writer(lambda rows: self._send_library(remote, rows), WIFI_HINT)
+            if install.platform in PLATFORMS:
+                self.garage.set_sleep_writer(lambda data: self._send_sleep(install, data))
         if install is not None and not wifi:
             self.garage.set_writer(lambda changes: self._write_settings(install, changes))
             if install.platform in PLATFORMS:
@@ -440,6 +442,15 @@ class MainWindow(QMainWindow):
             self, lambda progress: guarded_write(store, install.root, write, (), (), progress)
         )
         return f"{PHOTO_DIR}/{placed[0].name}"
+
+    def _send_sleep(self, install: KOReaderInstall, data: bytes) -> str:
+        """Over Wi-Fi: snapshot (the mirror), then send the picture into Photo/ (B-14)."""
+        wifi = self.wifi
+        if wifi is None:
+            raise MirrorError("the reader is not connected over Wi-Fi any more")
+        store = self.store_for(install)
+        with_snapshot_progress(self, lambda progress: store.take(install.root, (), progress), None)
+        return busy(lambda: wifi.send_picture(picture_name(datetime.now()), data))
 
     def check_health(self) -> QMessageBox | None:
         """After a write: did it finish, and did KOReader load every plugin and patch since?

@@ -14,12 +14,14 @@ verifies byte for byte that the reader's setup is untouched.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
 PHOTO_DIR = "Photo"
 SLEEP_LOGO = "system/logo/sleeplogo/pb_sleeplogo.bmp"  # the firmware's picture (read only)
 MAX_BYTES = 32 * 1024 * 1024  # a screen-sized PNG is a few MB; anything bigger is a bug
+PICTURE_NAME = re.compile(r"kodesk-sleep-\d{8}-\d{6}\.png")  # as picture_name makes them
 PLATFORMS = ("pocketbook",)  # Kobo/Kindle: KOReader's own screensaver settings (not built)
 
 

@@ -304,3 +304,26 @@ def test_an_old_pairing_must_be_paired_again(tmp_path: Path) -> None:
     keys = KeyStore(tmp_path / "wifi")
     with pytest.raises(MirrorError, match="Pair this reader again"):
         WifiReader.open(keys, Pairing(ID, "PocketBook"), "127.0.0.1", tmp_path / "m")
+
+
+def test_a_sleep_picture_is_sent_as_a_new_file_in_photo(
+    session: tuple[KeyStore, Pairing, FakeReader], volume: Path, tmp_path: Path
+) -> None:
+    """B-14 over Wi-Fi: a new file in Photo/ (made if missing), never a replacement; only names
+    kodesk makes; read back before it gets its name."""
+    mirror = Mirror(tmp_path / "mirror", KOREADER)
+    name = "kodesk-sleep-20261127-120000.png"
+    shutil.rmtree(volume / "Photo", ignore_errors=True)
+    with _sftp(session) as sftp:
+        assert mirror.send_picture(sftp, name, b"png") == f"Photo/{name}"
+        assert (volume / "Photo" / name).read_bytes() == b"png"
+        with pytest.raises(MirrorError, match="already on the reader"):
+            mirror.send_picture(sftp, name, b"other")
+        assert (volume / "Photo" / name).read_bytes() == b"png"
+        for bad in ("../x.png", "pb_sleeplogo.bmp", "kodesk-sleep-1.png"):
+            with pytest.raises(MirrorError, match="does not send"):
+                mirror.send_picture(sftp, bad, b"png")
+        with pytest.raises(MirrorError, match="unexpected size"):
+            mirror.send_picture(sftp, "kodesk-sleep-20261127-120001.png", b"")
+    assert sorted(p.name for p in (volume / "Photo").iterdir()) == [name]
+    assert not list(volume.rglob("*" + TEMP_SUFFIX))

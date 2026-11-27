@@ -20,10 +20,11 @@ Rules for sending:
   aside (``.kodesk-old``) and the new one takes its name. Once every file has been read back and
   its SHA-256 matches, the old ones are deleted. A failure on the way puts the old files back.
 
-One exception, a new file outside the mirror: a KOReader update is sent as
+Two exceptions, new files outside the mirror: a KOReader update is sent as
 ``ota/koreader.updated.tar`` (:meth:`Mirror.send_new`), which KOReader's launcher unpacks on the
-next start (B-27b). It never replaces a file, and is renamed into place only after it read back
-right.
+next start (B-27b); a PocketBook sleep picture goes into ``Photo/`` beside the KOReader folder
+(:meth:`Mirror.send_picture`, B-14). Neither ever replaces a file, and each is renamed into place
+only after it read back right.
 
 Names coming from the reader are checked before they become local paths (like zip entries:
 no ``..``, no separators); symbolic links are skipped, ``cache/`` is left out as in snapshots,
@@ -33,6 +34,7 @@ and of ``ota/`` (KOReader's update archives, tens of MB) only ``package.index`` 
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import stat
@@ -40,12 +42,14 @@ from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import IO
 
 import paramiko
 
 from kodesk.core.archive import INDEX as PACKAGE_INDEX
 from kodesk.core.install import READER_VOLUMES, KOReaderInstall, find_install, home_folder
-from kodesk.core.sleepscreen import SLEEP_LOGO
+from kodesk.core.sleepscreen import MAX_BYTES as MAX_PICTURE_BYTES
+from kodesk.core.sleepscreen import PHOTO_DIR, PICTURE_NAME, SLEEP_LOGO
 from kodesk.core.snapshot import (
     CHUNK,
     EXCLUDED_DIRS,
@@ -376,8 +380,11 @@ class Mirror:
         self._save_index()
 
     def _makedirs(self, sftp: Sftp, folder: str, made: list[str]) -> None:
+        """Create the missing folders of ``folder`` (volume-relative): inside the KOReader
+        folder, or ``Photo/`` itself (a reset reader may not have it yet)."""
         parts = folder.split("/")
-        for end in range(len(self.relative.split("/")) + 1, len(parts) + 1):
+        first = 1 if folder == PHOTO_DIR else len(self.relative.split("/")) + 1
+        for end in range(first, len(parts) + 1):
             path = self.remote("/".join(parts[:end]))
             try:
                 sftp.stat(path)
@@ -429,25 +436,60 @@ class Mirror:
         """
         if inside not in WIFI_NEW:
             raise MirrorError(f"kodesk does not send {inside} over Wi-Fi")
-        relative = f"{self.relative}/{inside}"
+        waiting = (
+            "A KOReader update is already waiting on the reader. Restart KOReader to "
+            "install it (Exit → Restart KOReader), then connect again."
+        )
+        with source.open("rb") as handle:
+            self._send_new_file(
+                sftp,
+                f"{self.relative}/{inside}",
+                (handle, source.stat().st_size, file_sha256(source)),
+                (waiting, "the update was not sent"),
+                progress,
+            )
+
+    def send_picture(self, sftp: Sftp, name: str, data: bytes) -> str:
+        """Upload a sleep picture as the new file ``Photo/<name>`` on the reader's volume (B-14);
+        return its volume-relative path. Never replaces a file."""
+        if not PICTURE_NAME.fullmatch(name):
+            raise MirrorError(f"kodesk does not send {name!r} over Wi-Fi")
+        if not data or len(data) > MAX_PICTURE_BYTES:
+            raise MirrorError(f"the picture has an unexpected size ({len(data)} bytes)")
+        relative = f"{PHOTO_DIR}/{name}"
+        self._send_new_file(
+            sftp,
+            relative,
+            (io.BytesIO(data), len(data), hashlib.sha256(data).hexdigest()),
+            (f"{relative} is already on the reader", "the picture was not sent"),
+            no_progress,
+        )
+        return relative
+
+    def _send_new_file(
+        self,
+        sftp: Sftp,
+        relative: str,
+        content: tuple[IO[bytes], int, str],
+        texts: tuple[str, str],
+        progress: Progress,
+    ) -> None:
+        """Upload ``content`` (handle, size, SHA-256) as the new file ``relative`` (to the
+        volume): beside it first, read back, then renamed; ``texts`` = (exists, failed)."""
+        handle, total, sha = content
         target = self.remote(relative)
         with suppress(FileNotFoundError):
             sftp.stat(target)
-            raise MirrorError(
-                "A KOReader update is already waiting on the reader. Restart KOReader to "
-                "install it (Exit → Restart KOReader), then connect again."
-            )
-        total = source.stat().st_size
+            raise MirrorError(texts[0])
         made: list[str] = []
         try:
             self._makedirs(sftp, PurePosixPath(relative).parent.as_posix(), made)
             progress(0, total)
-            with source.open("rb") as handle:
-                sftp.putfo(
-                    handle, target + TEMP_SUFFIX, total, lambda done, _all: progress(done, total)
-                )
-            if self._remote_sha(sftp, relative + TEMP_SUFFIX) != file_sha256(source):
-                raise MirrorError(f"{inside} reads back differently from the reader")
+            sftp.putfo(
+                handle, target + TEMP_SUFFIX, total, lambda done, _all: progress(done, total)
+            )
+            if self._remote_sha(sftp, relative + TEMP_SUFFIX) != sha:
+                raise MirrorError(f"{relative} reads back differently from the reader")
             sftp.rename(target + TEMP_SUFFIX, target)
         except Exception as error:
             with suppress(OSError):
@@ -456,7 +498,7 @@ class Mirror:
                 with suppress(OSError):
                     sftp.rmdir(folder)
             if isinstance(error, (MirrorError, OSError, paramiko.SSHException)):
-                raise MirrorError(f"the update was not sent: {error}") from error
+                raise MirrorError(f"{texts[1]}: {error}") from error
             raise
 
     def _remote_sha(self, sftp: Sftp, relative: str) -> str:
@@ -520,6 +562,12 @@ class WifiReader:
         with connect(self.keys, self.pairing, self.host) as connection:
             self.pairing = connection.pairing
             self.mirror.send_new(connection.sftp, OTA_UPDATE, archive, progress)
+
+    def send_picture(self, name: str, data: bytes) -> str:
+        """Put a sleep picture into the reader's ``Photo/`` (B-14); its volume-relative path."""
+        with connect(self.keys, self.pairing, self.host) as connection:
+            self.pairing = connection.pairing
+            return self.mirror.send_picture(connection.sftp, name, data)
 
     def publish(self) -> None:
         """Send the mirror's changes to the reader (the snapshot store's ``publish``)."""

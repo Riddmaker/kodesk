@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QStandardPaths
-from PySide6.QtWidgets import QSlider
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QMessageBox, QSlider
 from pytestqt.qtbot import QtBot
 
 from kodesk import __version__
@@ -234,3 +235,25 @@ def test_usb_connect_shows_the_result_and_drops_waiting_changes(
     assert not (koreader / rg.PENDING).exists()
     assert (koreader / rg.RESULT).is_file()
     assert main.check_wifi_changes() == (None, None)
+
+
+def test_sleep_picture_over_wifi_goes_into_photo(
+    qtbot: QtBot, tmp_path: Path, store: SnapshotStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """e2e (B-14 over Wi-Fi): a snapshot of the mirror first, then one new file in Photo/ on the
+    reader; the KOReader folder stays as it was."""
+    monkeypatch.setattr(TuningGarage, "confirm_sleep_write", lambda _self: True)
+    shown: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda _p, _t, text: shown.append(text))
+    with _over_wifi(qtbot, tmp_path, store, monkeypatch) as (main, koreader, _wifi):
+        assert main.install is not None
+        snapshots = main.store_for(main.install)
+        before = len(snapshots.snapshots())
+        settings_before = (koreader / "settings.reader.lua").read_bytes()
+        main.garage.sleep_panel.image = QImage(10, 10, QImage.Format.Format_RGB32)
+        main.garage.write_sleep_picture()
+        assert shown and "Photo/kodesk-sleep-" in shown[0], shown
+        photos = list((koreader.parents[1] / "Photo").glob("kodesk-sleep-*.png"))
+        assert len(photos) == 1 and photos[0].read_bytes().startswith(b"\x89PNG")
+        assert len(snapshots.snapshots()) == before + 1
+        assert (koreader / "settings.reader.lua").read_bytes() == settings_before
