@@ -52,6 +52,8 @@ from kodesk.ui.screen import load_device_fonts
 from kodesk.ui.snapshots import SnapshotsDialog, with_snapshot_progress
 from kodesk.ui.store import StorePage
 from kodesk.ui.wifi import UsbReader, WifiDialog
+from kodesk.ui.wifi_garage import HINT as WIFI_HINT
+from kodesk.ui.wifi_garage import SEEN, WifiGarage
 
 DEMO_DEVICE = "pocketbook-verse-pro-color"
 BOOK_SUFFIXES = {".epub", ".pdf", ".fb2", ".mobi", ".azw3", ".djvu", ".cbz", ".txt"}
@@ -179,6 +181,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.install: KOReaderInstall | None = None
         self.wifi: WifiReader | None = None  # the reader shown is reached over Wi-Fi (B-27)
+        self.remote_garage: WifiGarage | None = None  # its Garage changes (B-26)
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
@@ -263,7 +266,15 @@ class MainWindow(QMainWindow):
         self.koupdate.send = self.wifi.send_update if wifi and self.wifi else None  # B-27b
         self.reread()
         self.statusBar().showMessage(context.source_label)
-        if install is not None and not wifi:  # over Wi-Fi the Garage shows only (B-26)
+        self.remote_garage = None
+        if install is not None and wifi and self.wifi is not None:  # B-26
+            remote = WifiGarage(
+                self, install, self.store_for(install), self.wifi.mirror.base / SEEN
+            )
+            self.remote_garage = remote
+            self.garage.set_writer(remote.send_settings, WIFI_HINT)
+            self.garage.set_library_writer(lambda rows: self._send_library(remote, rows), WIFI_HINT)
+        if install is not None and not wifi:
             self.garage.set_writer(lambda changes: self._write_settings(install, changes))
             if install.platform in PLATFORMS:
                 self.garage.set_sleep_writer(lambda data: self._write_sleep(install, data))
@@ -293,13 +304,21 @@ class MainWindow(QMainWindow):
             install = wifi.install()
             source = (
                 f"KOReader {install.version or '?'} over Wi-Fi ({wifi.host}) · "
-                "the Garage only shows your settings here; change them over USB"
+                "Garage changes apply when KOReader restarts"
             )
             context = reader_context(install, library_names(wifi.books), source)
         except (InstallError, OSError) as error:
             return str(error)
         self.wifi = wifi
         self.set_context(context, install)
+        if self.remote_garage is not None:
+            waiting = len(self.remote_garage.waiting())
+            if waiting:
+                self.statusBar().showMessage(
+                    f"{source} · {waiting} change{'s' if waiting != 1 else ''} sent earlier "
+                    "wait for KOReader to restart"
+                )
+            QTimer.singleShot(0, self.remote_garage.show_result)
         return None
 
     def _over_wifi(self, install: KOReaderInstall | None) -> bool:
@@ -388,6 +407,14 @@ class MainWindow(QMainWindow):
         now = read_look(install.root, install.read_settings(), install.plugins())
         self.garage.context.library = now
         return f"Library look written. Snapshot from {taken} kept (Reader → Snapshots…).", now
+
+    def _send_library(
+        self, remote: WifiGarage, rows: dict[str, str | None]
+    ) -> tuple[str, LibraryLook]:
+        """The library look over Wi-Fi: sent for KOReader to apply when it restarts (B-26)."""
+        report, look = remote.send_library(self.garage.context.library, rows)
+        self.garage.context.library = look
+        return report, look
 
     def _write_sleep(self, install: KOReaderInstall, data: bytes) -> str:
         """Add a sleep-screen picture to the reader's Photo folder, inside a snapshot."""

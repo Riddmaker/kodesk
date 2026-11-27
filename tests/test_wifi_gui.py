@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QStandardPaths
+from PySide6.QtWidgets import QSlider
 from pytestqt.qtbot import QtBot
 
+from kodesk import __version__
 from kodesk.core import catalogue as cat
+from kodesk.core import remote_garage as rg
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.mirror import WifiReader
+from kodesk.core.remote_garage import PatchState
 from kodesk.core.snapshot import SnapshotStore
 from kodesk.core.wifi import AUTHORIZED_KEYS, KeyStore
 from kodesk.ui.app import MainWindow, demo_context
+from kodesk.ui.garage import TuningGarage
 from kodesk.ui.wifi import KEY_ONLY_TIP, NOT_PAIRED, UsbReader, WifiDialog
+from kodesk.ui.wifi_garage import WifiGarage
 from tests.conftest import FakeGitHub, fake_catalogue, make_reader, plugin_files, plugin_zip
 from tests.sftp_server import FakeReader, new_host_key, serve
 from tests.test_changes import CLOCK, Dialogs
@@ -85,17 +94,16 @@ def test_every_control_has_a_keyboard_way(dialog: WifiDialog) -> None:
         assert "&" in button.text()
 
 
-def test_connect_then_install_a_plugin_over_wifi(
+@contextmanager
+def _over_wifi(
     qtbot: QtBot, tmp_path: Path, store: SnapshotStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """e2e: pair over "USB", connect over Wi-Fi, install from the Store; it lands on the reader."""
+) -> Iterator[tuple[MainWindow, Path, WifiReader]]:
+    """Pair over "USB", connect over Wi-Fi to the local test server, show it in a main window."""
     QStandardPaths.setTestModeEnabled(True)
     monkeypatch.setattr(WifiDialog, "confirm", lambda _self, _title, _text: True)
-    dialogs = Dialogs(monkeypatch)
     served = tmp_path / "served"
     koreader = make_reader(served / "mnt" / "ext1", "pocketbook")
     (koreader / "version.log").write_text("2026-08-26, 08:01:22, v2026.07.2, PBVerseProColor\n")
-    settings_before = (koreader / "settings.reader.lua").read_bytes()
     usb = UsbReader(ID, "PocketBook Verse Pro", SETTINGS, koreader, store, KOREADER)
     dialog = WifiDialog(KeyStore(tmp_path / "wifi"), usb, None, tmp_path / "mirrors")
     qtbot.addWidget(dialog)
@@ -109,14 +117,23 @@ def test_connect_then_install_a_plugin_over_wifi(
         dialog.port.setValue(port)
         dialog.connect_button.click()
         assert shown, dialog.message.text()
-
         main = MainWindow(demo_context(), None, offline=True)
         qtbot.addWidget(main)
         assert main.show_wifi_reader(shown[0]) is None
+        yield main, koreader, shown[0]
+
+
+def test_connect_then_install_a_plugin_over_wifi(
+    qtbot: QtBot, tmp_path: Path, store: SnapshotStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """e2e: pair over "USB", connect over Wi-Fi, install from the Store; it lands on the reader."""
+    dialogs = Dialogs(monkeypatch)
+    with _over_wifi(qtbot, tmp_path, store, monkeypatch) as (main, koreader, _wifi):
+        settings_before = (koreader / "settings.reader.lua").read_bytes()
         assert "over Wi-Fi (127.0.0.1)" in main.statusBar().currentMessage()
         assert main.koreader_action.isEnabled()  # sent for the launcher over Wi-Fi (B-27b)
         assert main.koupdate.send is not None
-        assert main.garage.changes_box.writer is None  # the Garage only shows (B-26)
+        assert main.garage.changes_box.writer is not None  # sent for the patch (B-26)
         assert "Alice/" not in main.garage.context.library_entries
         assert "Alice" in main.garage.context.library_entries  # the book, read over Wi-Fi
 
@@ -132,3 +149,55 @@ def test_connect_then_install_a_plugin_over_wifi(
         qtbot.waitUntil(lambda: bool(dialogs.messages), timeout=20_000)
         assert folder.is_dir(), dialogs.messages
         assert (koreader / "settings.reader.lua").read_bytes() == settings_before
+
+
+def test_garage_changes_over_wifi_wait_for_koreader(
+    qtbot: QtBot, tmp_path: Path, store: SnapshotStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """e2e (B-26): a Garage change becomes the patch plus a change file on the reader; the
+    settings stay untouched; the next connect shows what KOReader did and offers an undo."""
+    dialogs = Dialogs(monkeypatch)
+    asked: list[PatchState] = []
+    monkeypatch.setattr(TuningGarage, "confirm_write", lambda _self, _count: True)
+
+    def consent(_self: WifiGarage, state: PatchState) -> bool:
+        asked.append(state)
+        return True
+
+    monkeypatch.setattr(WifiGarage, "consent", consent)
+    with _over_wifi(qtbot, tmp_path, store, monkeypatch) as (main, koreader, wifi):
+        settings_before = (koreader / "settings.reader.lua").read_bytes()
+        size = main.garage.findChild(QSlider, "font-size")
+        assert size is not None
+        old = size.value()
+        size.setValue(old + 4)
+        main.garage.write_changes()
+        assert "Restart KOReader" in main.garage.status.text(), dialogs.messages
+        assert asked == ["missing"]
+        assert (koreader / rg.PATCH).read_bytes() == rg.patch_source(__version__)
+        sent = rg.read_pending((koreader / rg.PENDING).read_bytes())
+        assert sent == [rg.Change("reader", ("copt_font_size",), old, old + 4)]
+        assert (koreader / "settings.reader.lua").read_bytes() == settings_before
+
+        size.setValue(old + 6)  # a second change merges into the waiting one, no new question
+        main.garage.write_changes()
+        assert asked == ["missing"]
+        sent = rg.read_pending((koreader / rg.PENDING).read_bytes())
+        assert sent == [rg.Change("reader", ("copt_font_size",), old, old + 6)]
+
+        # KOReader restarts: the patch applied the change (as tests/test_remote_garage.py runs it).
+        (koreader / rg.PENDING).unlink()
+        result = {"format": 1, "id": "a-1", "applied": [sent[0].to_json()], "skipped": {}}
+        (koreader / rg.RESULT).write_text(json.dumps(result))
+        wifi.sync()
+        assert main.show_wifi_reader(wifi) is None
+        remote = main.remote_garage
+        assert remote is not None
+        box = remote.show_result()
+        assert box is not None and "applied 1 setting" in box.text()
+        assert "another value by now" in box.informativeText()  # the fake did not change it
+        box.close()
+        assert remote.show_result() is None  # shown once
+        assert remote.undo(rg.read_result((koreader / rg.RESULT).read_bytes()))
+        undone = rg.read_pending((koreader / rg.PENDING).read_bytes())
+        assert undone == [rg.Change("reader", ("copt_font_size",), old + 6, old)]

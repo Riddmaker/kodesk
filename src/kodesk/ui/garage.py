@@ -50,6 +50,7 @@ from kodesk.core.librarymode import COVER_BROWSER, LibraryLook
 from kodesk.core.librarymode import label as mode_label
 from kodesk.core.luadump import KeyPath, LuaValue, SettingsDocument, changed_paths
 from kodesk.core.settings_write import SETTINGS_FILE, Changes
+from kodesk.core.snapshot import SnapshotCancelledError
 from kodesk.core.statusbar import (
     ALIGNMENTS,
     BAR_POSITIONS,
@@ -269,12 +270,19 @@ class KeyPanel(QGroupBox):
 SettingsWriter = Callable[[Changes], str]
 
 
+CLOSE_KOREADER = (
+    "Close KOReader on the reader first: it saves its own settings when it exits and "
+    "would overwrite these changes."
+)
+
+
 class ChangesBox(QGroupBox):
     """The pending changes and the button that writes them (only with a connected reader)."""
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__("Changed settings (not written yet)", parent)
         self.writer: SettingsWriter | None = None
+        self.hint = CLOSE_KOREADER
         self.list = QListWidget(self)
         self.list.setObjectName("changes")
         self.write_button = QPushButton("Write to reader…", self)
@@ -456,9 +464,11 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         """Key paths whose value differs from the reader's own settings."""
         return changed_paths(self.original.data, self.edited.data)
 
-    def set_writer(self, writer: SettingsWriter | None) -> None:
-        """Allow writing (a connected reader); without a writer the garage only previews."""
+    def set_writer(self, writer: SettingsWriter | None, hint: str = CLOSE_KOREADER) -> None:
+        """Allow writing (a connected reader); without a writer the garage only previews.
+        ``hint`` tells what the reader must do (over Wi-Fi: restart KOReader, B-26)."""
         self.changes_box.writer = writer
+        self.changes_box.hint = hint
         self.refresh()
 
     def confirm_write(self, count: int) -> bool:
@@ -471,10 +481,7 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
             f"Write {count} changed setting{'s' if count != 1 else ''} to your reader? "
             "kodesk takes a snapshot first; every other setting stays exactly as it is."
         )
-        box.setInformativeText(
-            "Close KOReader on the reader first: it saves its own settings when it exits and "
-            "would overwrite these changes."
-        )
+        box.setInformativeText(self.changes_box.hint)
         box.setDetailedText("\n".join(self.changes_box.lines()))
         action = box.addButton(
             f"Write {count} setting{'s' if count != 1 else ''}", QMessageBox.ButtonRole.AcceptRole
@@ -501,6 +508,8 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
             return
         try:
             report = writer(self.pending())
+        except SnapshotCancelledError:
+            return  # the user stopped it before anything was written
         except Exception as error:  # pylint: disable=broad-exception-caught  # shown, not raised
             QMessageBox.warning(self, "Write to your reader", str(error))
             return
@@ -804,9 +813,9 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         self.library_page = 0
         self.set_view(View.LIBRARY)
 
-    def set_library_writer(self, writer: LibraryWriter | None) -> None:
+    def set_library_writer(self, writer: LibraryWriter | None, hint: str | None = None) -> None:
         """Allow writing the library look (a connected reader with Cover browser on)."""
-        self.library_panel.set_writer(writer if self.context.library.drawer.cache else None)
+        self.library_panel.set_writer(writer if self.context.library.drawer.cache else None, hint)
 
     @property
     def dropped_sleep_image(self) -> QImage | None:

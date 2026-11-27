@@ -23,10 +23,12 @@ from PySide6.QtWidgets import (
 )
 
 from kodesk.core.librarymode import LibraryLook, kind, label
+from kodesk.core.snapshot import SnapshotCancelledError
 
 # The rows to write → (report for the status line, the look as the reader has it now).
 LibraryWriter = Callable[[dict[str, str | None]], tuple[str, LibraryLook]]
 
+CLOSE_KOREADER = "Close KOReader on the reader first: it keeps the cache open while it runs."
 UNIFIED_NOTE = (
     "Also sets History and Collections: “unified display mode” is on in {title} on your reader."
 )
@@ -44,6 +46,7 @@ class LibraryPanel(QGroupBox):
         self.look = look
         self.mode = look.mode
         self.writer: LibraryWriter | None = None
+        self.hint = CLOSE_KOREADER
         layout = QVBoxLayout(self)
         self.about = QLabel(self)
         self.about.setObjectName("library-about")
@@ -110,8 +113,10 @@ class LibraryPanel(QGroupBox):
             )
         self.about.setText(text)
 
-    def set_writer(self, writer: LibraryWriter | None) -> None:
+    def set_writer(self, writer: LibraryWriter | None, hint: str | None = None) -> None:
+        """``hint``: what the reader must do for the write (default: close KOReader)."""
         self.writer = writer
+        self.hint = hint or CLOSE_KOREADER
         self.enable_write()
 
     def enable_write(self) -> None:
@@ -158,9 +163,7 @@ class LibraryPanel(QGroupBox):
             f"“{label(self.look.drawer, self.look.mode)}”? kodesk changes only this setting "
             f"in {self.look.drawer.title}'s cache and takes a snapshot first."
         )
-        box.setInformativeText(
-            "Close KOReader on the reader first: it keeps the cache open while it runs."
-        )
+        box.setInformativeText(self.hint)
         box.setDetailedText("\n".join(self.preview_lines()))
         action = box.addButton("Write library look", QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
@@ -173,6 +176,8 @@ class LibraryPanel(QGroupBox):
             return
         try:
             report, look = self.writer(self.look.rows(self.mode))
+        except SnapshotCancelledError:
+            return  # the user stopped it before anything was written
         except Exception as error:  # pylint: disable=broad-exception-caught  # shown, not raised
             QMessageBox.warning(self, "Write the library look", str(error))
             return

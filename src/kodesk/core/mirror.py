@@ -9,9 +9,11 @@ sends the files that now differ to the reader (:meth:`Mirror.push`).
 
 Rules for sending:
 
-* Only below ``plugins/`` and ``patches/``. While Wi-Fi is on, KOReader is running and saves its
-  settings, history and book metadata itself; a file kodesk wrote there would be overwritten on
-  exit, or would overwrite the user's reading. Settings changes go through B-26.
+* Only below ``plugins/``, ``patches/`` and ``kodesk/``. While Wi-Fi is on, KOReader is running
+  and saves its settings, history and book metadata itself; a file kodesk wrote there would be
+  overwritten on exit, or would overwrite the user's reading. Settings changes therefore go to
+  ``kodesk/pending.json``, which a patch applies when KOReader starts again (B-26,
+  :mod:`kodesk.core.remote_garage`).
 * A file is replaced only if the reader still has the version kodesk read (size and time);
   otherwise nothing is sent.
 * In two steps: each new file is uploaded beside its target (``.kodesk-tmp``), the old one is set
@@ -56,7 +58,8 @@ from kodesk.core.update import LAYOUTS, OTA_UPDATE
 from kodesk.core.wifi import KeyStore, Pairing, check_host, check_reader_id, connect
 
 OLD_SUFFIX = ".kodesk-old"
-WIFI_WRITABLE = ("plugins/", "patches/")  # inside the KOReader folder; see the module text
+# Inside the KOReader folder (see the module text); kodesk/ holds the Garage change file (B-26).
+WIFI_WRITABLE = ("plugins/", "patches/", "kodesk/")
 WIFI_NEW = (OTA_UPDATE,)  # new files sent beside the mirror (Mirror.send_new)
 MAX_FILE_BYTES = 1 << 30  # larger than anything KOReader keeps; a bigger one is not fetched
 INDEX = "index.json"
@@ -314,8 +317,8 @@ class Mirror:
         refused = [p.removeprefix(self.relative + "/") for p in paths if not self.writable(p)]
         if refused:
             raise MirrorError(
-                "Over Wi-Fi kodesk changes only plugins and patches: KOReader is running and "
-                "saves its settings itself. Do this over USB with KOReader closed. "
+                "Over Wi-Fi kodesk changes only plugins, patches and its change file: KOReader "
+                "is running and saves its settings itself. Do this over USB with KOReader closed. "
                 f"(Would change: {', '.join(refused[:5])}{' …' if len(refused) > 5 else ''})"
             )
         for relative in paths:

@@ -27,6 +27,10 @@
           touch $out/PySide6/__init__.pyi $out/PySide6/py.typed
         '';
 
+      # LuaJIT (KOReader's interpreter) with stand-ins for KOReader's json, lfs and SQLite
+      # modules: the test suite runs kodesk's reader patch (B-26) with it. Tests only.
+      mkLuaForTests = pkgs: pkgs.luajit.withPackages (p: [ p.lua-cjson p.lsqlite3 p.luafilesystem ]);
+
       mkKodesk =
         pkgs:
         pkgs.python3Packages.buildPythonApplication {
@@ -63,7 +67,7 @@
           nativeCheckInputs = [
             pkgs.python3Packages.pytestCheckHook
             pkgs.python3Packages.pytest-qt
-            pkgs.luajit
+            (mkLuaForTests pkgs)
           ];
           preCheck = ''
             export QT_QPA_PLATFORM=offscreen
@@ -105,7 +109,7 @@
               ]
             ))
             pkgs.ruff
-            pkgs.luajit # cross-checks the Lua serializer against the real LuaJIT
+            (mkLuaForTests pkgs) # Lua serializer cross-check, reader patch tests (B-26)
             pkgs.qt6.qtbase
             pkgs.qt6.qtwayland
             pkgs.qt6.qtsvg

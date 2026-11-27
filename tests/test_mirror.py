@@ -163,7 +163,7 @@ def test_settings_are_never_sent_over_wifi(
         mirror.sync(sftp)
         (mirror.koreader_dir / "settings.reader.lua").write_text("return {}\n", encoding="utf-8")
         (mirror.koreader_dir / "patches/2-new.lua").write_text("-- new\n", encoding="utf-8")
-        with pytest.raises(MirrorError, match="only plugins and patches"):
+        with pytest.raises(MirrorError, match="only plugins, patches"):
             mirror.push(sftp)
     assert settings.read_bytes() == before
     assert not (volume / "applications/koreader/patches/2-new.lua").exists()  # all or nothing
@@ -249,7 +249,7 @@ def test_guarded_write_on_the_mirror_publishes_and_undoes_a_refusal(
         settings.write_text(settings.read_text() + "-- x\n")
 
     before = (koreader / "settings.reader.lua").read_bytes()
-    with pytest.raises(WriteRejectedError, match="only plugins and patches"):
+    with pytest.raises(WriteRejectedError, match="only plugins, patches"):
         guarded_write(store, install.root, touch_settings, allowed={"settings.reader.lua"})
     assert (koreader / "settings.reader.lua").read_bytes() == before
     assert (install.root / "settings.reader.lua").read_bytes() == before

@@ -14,7 +14,10 @@ a = Analysis(  # noqa: F821
     [str(ROOT / "src/kodesk/__main__.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
-    datas=[(str(ROOT / "src/kodesk/ui/resources"), "kodesk/ui/resources")],
+    datas=[
+        (str(ROOT / "src/kodesk/ui/resources"), "kodesk/ui/resources"),
+        (str(ROOT / "src/kodesk/core/resources"), "kodesk/core/resources"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
