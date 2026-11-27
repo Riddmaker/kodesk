@@ -19,6 +19,9 @@ Rules for sending:
 * In two steps: each new file is uploaded beside its target (``.kodesk-tmp``), the old one is set
   aside (``.kodesk-old``) and the new one takes its name. Once every file has been read back and
   its SHA-256 matches, the old ones are deleted. A failure on the way puts the old files back.
+  If the connection is lost during that, the next :meth:`Mirror.sync` finishes the job: a set-aside
+  file whose target is missing is put back, any other ``.kodesk-old`` or ``.kodesk-tmp`` is
+  deleted (the snapshot taken before the write still holds the old version).
 
 Two exceptions, new files outside the mirror: a KOReader update is sent as
 ``ota/koreader.updated.tar`` (:meth:`Mirror.send_new`), which KOReader's launcher unpacks on the
@@ -174,7 +177,12 @@ class Mirror:
 
     def listing(self, sftp: Sftp) -> dict[str, Attributes]:
         """Every regular file of the KOReader folder (not ``cache/``) plus :attr:`extra`."""
+        return self._walk(sftp)[0]
+
+    def _walk(self, sftp: Sftp) -> tuple[dict[str, Attributes], list[str]]:
+        """:meth:`listing`, and kodesk's own leftovers from an interrupted send."""
         found: dict[str, Attributes] = {}
+        leftovers: list[str] = []
         todo = [self.relative]
         while todo:
             folder = todo.pop()
@@ -195,12 +203,32 @@ class Mirror:
                         todo.append(relative)
                 elif stat.S_ISREG(mode) and self._mirrored(relative):
                     found[relative] = item
+                elif stat.S_ISREG(mode) and self._leftover(relative):
+                    leftovers.append(relative)
         for relative in self.extra:
             with suppress(OSError):
                 item = sftp.stat(self.remote(relative))
                 if stat.S_ISREG(item.st_mode or 0):
                     found[relative] = item
-        return found
+        return found, leftovers
+
+    def _leftover(self, relative: str) -> bool:
+        """A temp or set-aside file kodesk itself may have left (only where it sends to)."""
+        inside = relative.removeprefix(self.relative + "/")
+        if inside == OTA_UPDATE + TEMP_SUFFIX:
+            return True
+        return relative.endswith((TEMP_SUFFIX, OLD_SUFFIX)) and self.writable(relative)
+
+    def _tidy(self, sftp: Sftp, leftovers: Iterable[str], present: set[str]) -> None:
+        """Finish a send that a lost connection interrupted (see the module text)."""
+        for relative in leftovers:
+            path = self.remote(relative)
+            target = relative.removesuffix(OLD_SUFFIX)
+            with suppress(OSError):
+                if target != relative and target not in present:
+                    sftp.rename(path, self.remote(target))  # never replaces a file
+                else:
+                    sftp.remove(path)
 
     def _mirrored(self, relative: str) -> bool:
         if relative.endswith((TEMP_SUFFIX, OLD_SUFFIX)):
@@ -243,7 +271,10 @@ class Mirror:
         """Make the mirror match the reader; ``progress`` gets bytes fetched and to fetch."""
         self.files.mkdir(parents=True, exist_ok=True)
         self.base.chmod(0o700)  # the copy holds the reader's settings, as snapshots do
-        remote = self.listing(sftp)
+        remote, leftovers = self._walk(sftp)
+        if leftovers:
+            self._tidy(sftp, leftovers, set(remote))
+            remote = self.listing(sftp)
         fetch = [(p, item) for p, item in sorted(remote.items()) if not self._fresh(p, item)]
         total = sum(item.st_size or 0 for _p, item in fetch)
         done = 0

@@ -258,6 +258,32 @@ def test_guarded_write_on_the_mirror_publishes_and_undoes_a_refusal(
     assert not (koreader / "plugins/wifitest.koplugin").exists()
 
 
+def test_connect_finishes_a_send_the_lost_connection_interrupted(
+    session: tuple[KeyStore, Pairing, FakeReader], volume: Path, tmp_path: Path
+) -> None:
+    koreader = volume / "applications/koreader"
+    plugin = volume / PLUGIN
+    first, second = sorted(p for p in plugin.iterdir() if p.is_file())[:2]
+    old_first = first.read_bytes()
+    first.rename(first.with_name(first.name + ".kodesk-old"))  # set aside, new one not placed
+    second.with_name(second.name + ".kodesk-old").write_bytes(b"-- old\n")  # new one placed
+    (koreader / f"patches/{USER_PATCH}{TEMP_SUFFIX}").write_bytes(b"half")
+    (koreader / "ota").mkdir(exist_ok=True)
+    (koreader / f"ota/koreader.updated.tar{TEMP_SUFFIX}").write_bytes(b"half")
+    foreign = koreader / "settings.reader.lua.kodesk-old"  # not where kodesk sends: left alone
+    foreign.write_bytes(b"x")
+    mirror = Mirror(tmp_path / "mirror", KOREADER)
+    with _sftp(session) as sftp:
+        mirror.sync(sftp)
+    assert first.read_bytes() == old_first
+    assert not list(plugin.glob("*.kodesk-*"))
+    assert not list(koreader.glob(f"patches/*{TEMP_SUFFIX}"))
+    assert not list(koreader.glob(f"ota/*{TEMP_SUFFIX}"))
+    assert foreign.read_bytes() == b"x"
+    assert (mirror.files / PLUGIN / first.name).read_bytes() == old_first
+    assert mirror.changes() == ((), ())
+
+
 def test_sync_leaves_koreaders_update_archives_out(
     session: tuple[KeyStore, Pairing, FakeReader], volume: Path, tmp_path: Path
 ) -> None:
