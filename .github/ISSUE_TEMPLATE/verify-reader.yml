@@ -1,0 +1,57 @@
+# "Verify your reader": a report from a device owner. Enough reports for a model turn it from
+# "community-tested" into "verified" (README). No serial numbers, IP addresses or file paths.
+name: Verify your reader
+description: Tell us how kodesk worked with your e-reader model.
+title: "Reader report: "
+labels: ["reader-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Please leave out serial numbers, IP addresses and anything personal
+        (book titles, user names in paths).
+  - type: input
+    id: model
+    attributes:
+      label: Reader model
+      placeholder: PocketBook Verse Pro Color (PB634K3)
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Reader firmware version
+      description: Optional, as shown in the reader's settings.
+  - type: input
+    id: koreader
+    attributes:
+      label: KOReader version
+      description: As kodesk shows it in the status bar, e.g. v2026.07.2.
+    validations:
+      required: true
+  - type: input
+    id: kodesk
+    attributes:
+      label: kodesk version and computer
+      placeholder: kodesk 0.1.0 on Windows 11 / macOS 15 / Fedora 43 (Flatpak)
+    validations:
+      required: true
+  - type: checkboxes
+    id: worked
+    attributes:
+      label: What worked?
+      description: Tick what you tried and what went fine.
+      options:
+        - label: The reader was found over USB
+        - label: The Tuning-Garage showed my settings correctly
+        - label: Writing a Garage change (and KOReader shows it)
+        - label: Installing, updating or removing a plugin or patch
+        - label: Updating KOReader
+        - label: Restoring a snapshot
+        - label: Pairing and connecting over Wi-Fi
+        - label: A Garage change over Wi-Fi (applied after restarting KOReader)
+  - type: textarea
+    id: problems
+    attributes:
+      label: What did not work, or looked wrong?
+      description: Optional. What you did, what you expected, what happened. Screenshots help.
