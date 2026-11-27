@@ -11,11 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from urllib.parse import urlencode
 
+from kodesk.core.catalogue import Entry, Kind
 from kodesk.core.luadump import KeyPath
 
 NOT_SUPPORTED = "Not adjustable in kodesk — set it on the reader as usual"
 SUPPORTED = "Adjustable in the Garage"
+# B-24: GitHub's issue form (.github/ISSUE_TEMPLATE/gui-support.yml); fields are prefilled by id.
+ISSUE_FORM = "https://github.com/Riddmaker/kodesk/issues/new"
+ISSUE_TEMPLATE = "gui-support.yml"
 
 
 class Area(StrEnum):
@@ -113,3 +118,22 @@ def for_repo(owner: str, repo: str) -> Extension | None:
         ),
         None,
     )
+
+
+def gui_support_url(entry: Entry) -> str:
+    """B-24: the prefilled issue form asking for ``entry`` in the Garage. Only what the Store
+    shows anyway (name, kind, source, version); nothing about the user or the reader."""
+    changed = entry.pushed_at[:10] or "unknown"
+    if entry.kind is Kind.PATCH:
+        version = f"file {entry.file_sha[:12] or 'unknown'}, last change {changed}"
+    else:
+        version = f"{entry.branch or 'default'} branch, last change {changed}"
+    fields = {
+        "template": ISSUE_TEMPLATE,
+        "title": f"GUI support: {entry.name}",
+        "extension": entry.name,
+        "kind": entry.kind.value,
+        "source": entry.url,
+        "version": version,
+    }
+    return f"{ISSUE_FORM}?{urlencode(fields)}"

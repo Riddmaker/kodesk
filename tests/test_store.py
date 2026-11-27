@@ -223,3 +223,23 @@ def test_search_for_fills_in_and_selects(page: tuple[StorePage, Fake]) -> None:
     current = store.current()
     assert current is not None and current.name == "readingclock"
     assert NOT_SUPPORTED in store.details.badges.text()
+
+
+def test_request_gui_support_opens_the_prefilled_form(
+    page: tuple[StorePage, Fake], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B-24: only for entries kodesk does not support; the browser does the rest."""
+    store, _fake = page
+    opened: list[str] = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toString()))
+    store.list.setCurrentRow(0)
+    button = store.details.request_button
+    assert button.isVisibleTo(store) and button.text().replace("&", "") == "Request GUI support"
+    button.click()
+    assert len(opened) == 1
+    assert opened[0].startswith("https://github.com/Riddmaker/kodesk/issues/new?template=")
+    assert f"extension={THIRD_PARTY_PLUGIN}" in opened[0]
+    entry = store.current()
+    assert entry is not None
+    store.details.show_entry(replace(entry, owner="glaucon1984", repo="pbfixes.koplugin"), False)
+    assert not button.isVisibleTo(store)

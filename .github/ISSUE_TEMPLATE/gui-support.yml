@@ -1,0 +1,42 @@
+# Opened from kodesk's Store ("Request GUI support"): the app fills in the fields below through
+# URL query parameters (each field's id). kodesk sends nothing itself and includes no device data.
+name: Request GUI support
+description: Ask for an extension's settings to become adjustable in kodesk's Tuning-Garage.
+title: "GUI support: "
+labels: ["gui-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! kodesk only adjusts extensions it knows: each one is added by hand after its
+        code was checked, so its settings are never guessed. Check the fields and press Submit.
+  - type: input
+    id: extension
+    attributes:
+      label: Extension
+      description: Plugin or patch name, as in kodesk's Store.
+    validations:
+      required: true
+  - type: input
+    id: kind
+    attributes:
+      label: Kind
+      description: Plugin or patch.
+  - type: input
+    id: source
+    attributes:
+      label: Source
+      description: The extension's repository or file.
+      placeholder: https://github.com/owner/repo
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: As the Store showed it (branch or file, and its last change).
+  - type: textarea
+    id: area
+    attributes:
+      label: What should be adjustable?
+      description: Optional. Which Garage view (Book open, Menu, Library, Sleep screen) or which setting.

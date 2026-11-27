@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from kodesk.core import catalogue as cat
 from kodesk.core.catalogue import Catalogue, Entry, Kind
-from kodesk.core.extensions import NOT_SUPPORTED, SUPPORTED, for_repo
+from kodesk.core.extensions import NOT_SUPPORTED, SUPPORTED, for_repo, gui_support_url
 
 LoadCatalogue = Callable[[], Catalogue]
 FetchText = Callable[[Entry], str]
@@ -134,6 +134,14 @@ class EntryDetails(QWidget):
         self.link.linkActivated.connect(open_external)
         self.install_button = QPushButton("Ins&tall…", self)
         self.install_button.setObjectName("store-install")
+        self.request_button = QPushButton("Re&quest GUI support", self)
+        self.request_button.setObjectName("store-request")
+        self.request_button.setToolTip(
+            "Opens a prefilled request on kodesk's GitHub page in your browser; you only press "
+            "Submit there (needs a GitHub account). kodesk sends nothing itself."
+        )
+        self.request_button.clicked.connect(self._request)
+        self.entry: Entry | None = None
         self.readme = ReadmeView(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -142,6 +150,7 @@ class EntryDetails(QWidget):
             layout.addWidget(label)
         row = QHBoxLayout()
         row.addWidget(self.install_button)
+        row.addWidget(self.request_button)
         row.addStretch(1)
         layout.addLayout(row)
         for label in (self.title, self.facts, self.badges):  # index text is data, never markup
@@ -150,8 +159,11 @@ class EntryDetails(QWidget):
 
     def show_entry(self, entry: Entry | None, installed: bool) -> None:
         """Fill in ``entry``, or show a hint when nothing is selected."""
+        self.entry = entry
         for widget in (self.facts, self.badges, self.link, self.readme, self.install_button):
             widget.setVisible(entry is not None)
+        supported = entry is not None and for_repo(entry.owner, entry.repo) is not None
+        self.request_button.setVisible(entry is not None and not supported)
         if entry is None:
             self.title.setText("Select a plugin or patch to see its details.")
             return
@@ -167,6 +179,11 @@ class EntryDetails(QWidget):
         self.link.setText(f'<a href="{url}">{url}</a>')
         what = "code" if entry.kind is Kind.PATCH else "README"
         self.readme.setPlainText(f"{entry.description}\n\nLoading the {what}…")
+
+    def _request(self) -> None:
+        """B-24: open the prefilled issue form in the browser."""
+        if self.entry is not None:
+            open_external(gui_support_url(self.entry))
 
 
 class StorePage(QWidget):  # pylint: disable=too-many-instance-attributes  # widgets

@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
-from kodesk.core.extensions import EXTENSIONS, Area, for_area, for_repo, installed_for, supported
+from kodesk.core.catalogue import Entry, Kind
+from kodesk.core.extensions import (
+    EXTENSIONS,
+    ISSUE_TEMPLATE,
+    Area,
+    for_area,
+    for_repo,
+    gui_support_url,
+    installed_for,
+    supported,
+)
 from kodesk.core.icons import MAX_BYTES, icon_file, user_icons
 
 SVG = (
@@ -62,3 +74,58 @@ def test_odd_icon_files_are_not_drawn(tmp_path: Path) -> None:
     assert icon_file(tmp_path, "link") is None
     assert icon_file(tmp_path, "../elsewhere") is None
     assert icon_file(tmp_path, "missing") is None
+
+
+FORM = Path(__file__).parent.parent / ".github/ISSUE_TEMPLATE/gui-support.yml"
+
+
+def test_gui_support_url_is_prefilled_without_device_data() -> None:
+    plugin = Entry(
+        Kind.PLUGIN,
+        "p1",
+        "readingclock",
+        "alice",
+        "readingclock.koplugin",
+        "https://github.com/alice/readingclock.koplugin",
+        "A clock & more",
+        branch="main",
+        pushed_at="2026-10-01T12:00:00Z",
+    )
+    url = urlsplit(gui_support_url(plugin))
+    assert (url.scheme, url.netloc, url.path) == (
+        "https",
+        "github.com",
+        "/Riddmaker/kodesk/issues/new",
+    )
+    fields = dict(parse_qsl(url.query))
+    assert fields == {
+        "template": ISSUE_TEMPLATE,
+        "title": "GUI support: readingclock",
+        "extension": "readingclock",
+        "kind": "plugin",
+        "source": "https://github.com/alice/readingclock.koplugin",
+        "version": "main branch, last change 2026-10-01",
+    }
+    patch = Entry(
+        Kind.PATCH,
+        "x",
+        "2-a.lua",
+        "bob",
+        "patches",
+        "https://github.com/bob/x",
+        "",
+        file_sha="0123456789abcdef",
+    )
+    assert dict(parse_qsl(urlsplit(gui_support_url(patch)).query))["version"] == (
+        "file 0123456789ab, last change unknown"
+    )
+
+
+def test_every_prefilled_field_is_in_the_issue_form() -> None:
+    """GitHub ignores a query parameter whose id the form lacks: keep both in step."""
+    text = FORM.read_text(encoding="utf-8")
+    ids = set(re.findall(r"^\s+id: ([\w-]+)$", text, re.MULTILINE))
+    entry = Entry(Kind.PLUGIN, "i", "n", "o", "r", "https://github.com/o/r", "")
+    keys = {k for k, _v in parse_qsl(urlsplit(gui_support_url(entry)).query)}
+    assert keys - {"template", "title"} <= ids
+    assert f"/{ISSUE_TEMPLATE}" in FORM.as_posix()
