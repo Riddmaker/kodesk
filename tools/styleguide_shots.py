@@ -11,6 +11,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QTimer
@@ -89,6 +90,7 @@ def main(argv: list[str]) -> int:
                 shot("garage-bottom-edge")
         status_bar_shot(garage)
         shot("garage-status-bars")
+        library_shots(garage, shot)
         garage.set_view(View.SLEEP)
         shot("garage-sleep")
         snapshot_shots(app, window, out, suffix)
@@ -99,6 +101,16 @@ def main(argv: list[str]) -> int:
         koreader_update_shot(app, window, out, suffix)
         window.close()
     return 0
+
+
+def library_shots(garage: TuningGarage, shot: Callable[[str], None]) -> None:
+    """The library as Cover browser draws it by default, then switched to the mosaic."""
+    garage.set_view(View.LIBRARY)
+    shot("garage-library-list")
+    mode = garage.library_panel.combo
+    mode.setCurrentIndex(mode.findData("mosaic_image"))
+    mode.setFocus()
+    shot("garage-library-mosaic")
 
 
 def grab_modal(app: QApplication, path: Path, tries: int = 50) -> None:

@@ -473,37 +473,148 @@ def _paint_title_bar(painter: QPainter, files: FileList, width: int, path: str) 
     return files.title_h(title_line, sub_line)
 
 
+@dataclass(frozen=True)
+class Shelf:
+    """How the library is drawn: KOReader's classic list (mode None) or a mode of Cover browser
+    / Project: Title (kodesk.core.librarymode), with the page sizes the reader uses."""
+
+    mode: str | None = None
+    grid: tuple[int, int] = (3, 3)  # mosaic columns × rows
+    per_page: int = 10  # list rows
+    path: str = "/mnt/ext1"
+
+
 def render_library(
-    size: tuple[int, int], night: bool, entries: list[str], page: int, path: str = "/mnt/ext1"
+    size: tuple[int, int], night: bool, entries: list[str], page: int, shelf: Shelf | None = None
 ) -> QImage:
-    """The file browser in classic list mode, measured from menu.lua and titlebar.lua
-    (kodesk.core.menus). Folder sizes and file counts are not drawn (names only)."""
+    """The file browser. The classic list is measured from menu.lua and titlebar.lua
+    (kodesk.core.menus); list and mosaic modes are an approximation (B-21): the same title bar
+    and footer, the plugin's rows or grid, plain placeholders instead of real covers. Folder
+    sizes, file counts, authors and progress are not drawn (names only)."""
+    shelf = shelf or Shelf()
     width, height = size
     image, painter, ink = _canvas(size, night)
-    files = file_list(width, height)
-    title_h = _paint_title_bar(painter, files, width, path)
-    # Rows: name left at the side padding, a dark gray line under each.
-    item_h = files.item_h(height, title_h)
-    pages = max(1, -(-len(entries) // files.per_page))
+    kind = (shelf.mode or "classic").split("_", 1)[0]
+    files = file_list(width, height, shelf.per_page) if kind == "list" else file_list(width, height)
+    title_h = _paint_title_bar(painter, files, width, shelf.path)
+    per_page = shelf.grid[0] * shelf.grid[1] if kind == "mosaic" else files.per_page
+    pages = max(1, -(-len(entries) // per_page))
     page = max(0, min(page, pages - 1))
-    name_font = _font("Noto Sans", files.name_font_px, QFont.StyleHint.SansSerif)
-    metrics = QFontMetricsF(name_font)
-    painter.setFont(name_font)
-    content_w = width - 2 * files.side_pad
+    shown = entries[page * per_page : (page + 1) * per_page]
     gray = QColor("#aaaaaa") if night else QColor("#555555")  # COLOR_DARK_GRAY
-    y = title_h
-    for entry in entries[page * files.per_page : (page + 1) * files.per_page]:
-        painter.setPen(ink)
-        painter.drawText(
-            QRectF(files.side_pad, y, content_w, item_h - files.line),
-            int(Qt.AlignmentFlag.AlignVCenter),
-            metrics.elidedText(entry, Qt.TextElideMode.ElideRight, content_w),
-        )
-        painter.fillRect(files.side_pad, y + item_h - files.line, content_w, files.line, gray)
-        y += item_h
+    body = QRectF(0, title_h, width, height - title_h - files.footer_h)
+    if kind == "mosaic":
+        _paint_mosaic(painter, (ink, gray), files, body, shown, shelf.grid)
+    else:
+        _paint_rows(painter, (ink, gray), files, body, shown, shelf.mode)
     _paint_page_footer(painter, ink if pages > 1 else gray, files, size, (page, pages))
     painter.end()
     return image
+
+
+def _paint_rows(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    painter: QPainter,
+    pens: tuple[QColor, QColor],
+    files: FileList,
+    body: QRectF,
+    entries: list[str],
+    mode: str | None,
+) -> None:
+    """One row per entry, a dark gray line under each; list modes with a cover placeholder
+    left (listmenu.lua) and the name in bold where the plugin shows the book's title."""
+    ink, gray = pens
+    item_h = files.item_h(round(body.bottom() + files.footer_h), round(body.top()))
+    covers = mode is not None and "image" in mode
+    name_font = _font("Noto Sans", files.name_font_px, QFont.StyleHint.SansSerif)
+    name_font.setBold(mode is not None and "meta" in mode)
+    metrics = QFontMetricsF(name_font)
+    painter.setFont(name_font)
+    y = body.top()
+    for entry in entries:
+        left = files.side_pad
+        if covers:
+            pad = files.side_pad / 3
+            cover_h = item_h - files.line - 2 * pad
+            _paint_cover(painter, (ink, gray), QRectF(left, y + pad, cover_h * 0.7, cover_h), entry)
+            left += round(cover_h * 0.7 + files.side_pad)
+        content_w = body.width() - left - files.side_pad
+        painter.setPen(ink)
+        painter.drawText(
+            QRectF(left, y, content_w, item_h - files.line),
+            int(Qt.AlignmentFlag.AlignVCenter),
+            metrics.elidedText(entry, Qt.TextElideMode.ElideRight, content_w),
+        )
+        painter.fillRect(
+            QRectF(
+                files.side_pad,
+                y + item_h - files.line,
+                body.width() - 2 * files.side_pad,
+                files.line,
+            ),
+            gray,
+        )
+        y += item_h
+
+
+def _paint_mosaic(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    painter: QPainter,
+    pens: tuple[QColor, QColor],
+    files: FileList,
+    body: QRectF,
+    entries: list[str],
+    grid: tuple[int, int],
+) -> None:
+    """A grid of covers (mosaicmenu.lua); a book without a cover image shows its name in a
+    frame, which is what every placeholder here looks like."""
+    cols, rows = grid
+    cell_w = (body.width() - 2 * files.side_pad) / cols
+    cell_h = body.height() / rows
+    margin = files.side_pad / 2
+    painter.setFont(_font("Noto Sans", files.info_font_px, QFont.StyleHint.SansSerif))
+    for index, entry in enumerate(entries):
+        x = files.side_pad + (index % cols) * cell_w
+        y = body.top() + (index // cols) * cell_h
+        cover_h = cell_h - 2 * margin
+        cover_w = min(cell_w - 2 * margin, cover_h * 0.7)
+        rect = QRectF(x + (cell_w - cover_w) / 2, y + margin, cover_w, cover_h)
+        _paint_cover(painter, pens, rect, entry, named=True)
+
+
+def _paint_cover(
+    painter: QPainter,
+    pens: tuple[QColor, QColor],
+    rect: QRectF,
+    entry: str,
+    named: bool = False,
+) -> None:
+    """A cover placeholder: a frame (two for a folder), the name inside when ``named``."""
+    ink, gray = pens
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(gray, max(1.0, rect.width() / 80)))
+    if entry.endswith("/"):  # a folder: the edge of a second frame behind, like a stack
+        step = rect.width() / 12
+        rect = rect.adjusted(0, step, -step, 0)
+        painter.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(rect.left() + step, rect.top()),
+                    QPointF(rect.left() + step, rect.top() - step),
+                    QPointF(rect.right() + step, rect.top() - step),
+                    QPointF(rect.right() + step, rect.bottom() - step),
+                    QPointF(rect.right(), rect.bottom() - step),
+                ]
+            )
+        )
+    painter.drawRect(rect)
+    if named:
+        painter.setPen(ink)
+        pad = rect.width() / 10
+        inner = rect.adjusted(pad, pad, -pad, -pad)
+        painter.drawText(
+            inner,
+            int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap),
+            entry.rstrip("/"),
+        )
 
 
 def _paint_page_footer(

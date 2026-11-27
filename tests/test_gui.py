@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -27,6 +27,7 @@ from pytestqt.qtbot import QtBot
 from kodesk.core import healthcheck
 from kodesk.core.devices import Face
 from kodesk.core.install import find_install
+from kodesk.core.librarymode import COVER_BROWSER, read_config
 from kodesk.core.snapshot import (
     Progress,
     RestorePlan,
@@ -36,6 +37,7 @@ from kodesk.core.snapshot import (
 )
 from kodesk.ui.app import MainWindow, demo_context, reader_context, snapshot_store
 from kodesk.ui.garage import TuningGarage, View
+from kodesk.ui.library_panel import LibraryPanel
 from kodesk.ui.snapshots import (
     WRITING,
     SnapshotsDialog,
@@ -45,6 +47,7 @@ from kodesk.ui.snapshots import (
 )
 from tests.conftest import make_pocketbook, make_reader
 from tests.test_extensions import SVG
+from tests.test_librarymode import make_cache
 
 pytestmark = pytest.mark.gui
 
@@ -422,11 +425,17 @@ def test_demo_reader_has_no_snapshots(qtbot: QtBot) -> None:
     assert not window.snapshots_action.isEnabled() and window.show_snapshots() is None
 
 
-def _real_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[MainWindow, Path]:
+def _real_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepare: Callable[[Path], object] = lambda _root: None,
+) -> tuple[MainWindow, Path]:
+    """A fake PocketBook Verse Pro Color; ``prepare`` gets its KOReader folder first."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     QStandardPaths.setTestModeEnabled(True)
     koreader = make_reader(tmp_path / "PB634K3", "pocketbook")
     (koreader / "version.log").write_text("2026-08-26, 08:01:22, v2026.07.1, PBVerseProColor\n")
+    prepare(koreader)
     install = find_install(tmp_path / "PB634K3")
     return MainWindow(reader_context(install), install), koreader
 
@@ -577,3 +586,80 @@ def test_sleep_picture_is_chosen_previewed_and_put_on_the_reader(
     assert QImage(str(placed[0])).size() == shown.size()
     assert "Settings → Personalize → Logos" in guides[0]
     assert snapshot_store(find_install(pocketbook)).snapshots()  # snapshot first (hard rule)
+
+
+def test_library_look_is_previewed_without_a_reader(qtbot: QtBot) -> None:
+    window = MainWindow(demo_context(), offline=True)
+    qtbot.addWidget(window)
+    garage = window.garage
+    combo = garage.findChild(QComboBox, "library-mode")
+    write = garage.findChild(QPushButton, "library-write")
+    assert combo is not None and write is not None
+    garage.set_view(View.LIBRARY)
+    classic = garage.screen_image()
+    combo.setCurrentIndex(combo.findData("mosaic_image"))  # keyboard: Alt+L, then arrows
+    assert garage.view is View.LIBRARY
+    assert garage.screen_image() != classic
+    assert not garage.changed()  # not a settings.reader.lua change
+    assert not write.isEnabled()  # demo: nothing to write to
+    assert garage.status.text() == "Library · Mosaic with cover images"
+
+
+def test_library_look_needs_the_cache_to_write(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, _koreader = _real_reader(tmp_path, monkeypatch)  # KOReader never drew covers
+    qtbot.addWidget(window)
+    panel = window.garage.library_panel
+    panel.combo.setCurrentIndex(panel.combo.findData("mosaic_image"))
+    assert not panel.write_button.isEnabled()
+    assert "open the library on the reader once" in panel.write_button.toolTip()
+
+
+def _reader_with_cover_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[MainWindow, Path]:
+    window, koreader = _real_reader(
+        tmp_path,
+        monkeypatch,
+        lambda root: make_cache(
+            root / COVER_BROWSER.cache, {"filemanager_display_mode": "list_image_meta"}
+        ),
+    )
+    return window, koreader / COVER_BROWSER.cache
+
+
+def test_library_look_is_written_into_the_cache_after_a_snapshot(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, cache = _reader_with_cover_browser(tmp_path, monkeypatch)
+    qtbot.addWidget(window)
+    panel = window.garage.library_panel
+    assert panel.combo.currentData() == "list_image_meta"
+    assert not panel.write_button.isEnabled()
+    panel.combo.setCurrentIndex(panel.combo.findData("mosaic_image"))
+    assert panel.write_button.isEnabled()
+    assert "  filemanager_display_mode: list_image_meta → mosaic_image" in panel.preview_lines()
+    monkeypatch.setattr(LibraryPanel, "confirm", lambda _self: True)
+    panel.write_button.click()
+    assert read_config(cache)["filemanager_display_mode"] == "mosaic_image"
+    assert window.garage.status.text().startswith("Library look written.")
+    assert not panel.write_button.isEnabled()  # the reader has it now
+    assert install_snapshots(window) == 1
+
+
+def test_library_look_refused_while_koreader_has_the_cache_open(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, cache = _reader_with_cover_browser(tmp_path, monkeypatch)
+    qtbot.addWidget(window)
+    panel = window.garage.library_panel
+    panel.combo.setCurrentIndex(panel.combo.findData("mosaic_text"))
+    cache.with_name(cache.name + "-wal").write_bytes(b"")  # KOReader started meanwhile
+    warnings: list[str] = []
+    monkeypatch.setattr(LibraryPanel, "confirm", lambda _self: True)
+    monkeypatch.setattr(QMessageBox, "warning", lambda _p, _t, text: warnings.append(text))
+    panel.write_button.click()
+    assert "Close KOReader" in warnings[0]
+    assert read_config(cache)["filemanager_display_mode"] == "list_image_meta"
+    assert install_snapshots(window) == 0

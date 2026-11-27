@@ -26,6 +26,7 @@ from kodesk.core import catalogue, healthcheck, icons, net
 from kodesk.core.devices import DEVICES
 from kodesk.core.icons import icon_file
 from kodesk.core.install import InstallError, KOReaderInstall, find_install, volume_root
+from kodesk.core.librarymode import LibraryLook, read_look, write_mode
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.settings_write import write_settings
 from kodesk.core.sleepscreen import PHOTO_DIR, PLATFORMS, place_picture
@@ -92,6 +93,7 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
         sleep_image=sleep if sleep.is_file() else None,
         plugins=install.plugins(),
         icons=menu_icons(install.root),
+        library=read_look(install.root, settings, install.plugins()),
         source_label=f"KOReader {install.version or '?'} on {volume}",
     )
 
@@ -216,6 +218,7 @@ class MainWindow(QMainWindow):
             )
             if install.platform in PLATFORMS:
                 self.garage.set_sleep_writer(lambda data: self._write_sleep(install, data))
+            self.garage.set_library_writer(lambda rows: self._write_library(install, rows))
             QTimer.singleShot(0, self.check_health)
 
     def show_in_store(self, search: str, select: str) -> None:
@@ -290,6 +293,23 @@ class MainWindow(QMainWindow):
         )
         taken = snapshot.created.astimezone().strftime("%H:%M")
         return f"Written to your reader. Snapshot from {taken} kept (Reader → Snapshots…)."
+
+    def _write_library(
+        self, install: KOReaderInstall, rows: dict[str, str | None]
+    ) -> tuple[str, LibraryLook]:
+        """Write the library look into the plugin's cache, inside a snapshot."""
+        store = snapshot_store(install)
+        look = self.garage.context.library
+        snapshot = with_snapshot_progress(
+            self,
+            lambda progress: write_mode(
+                store, install.root, look.drawer, rows, look.read, progress
+            ),
+        )
+        taken = snapshot.created.astimezone().strftime("%H:%M")
+        now = read_look(install.root, install.read_settings(), install.plugins())
+        self.garage.context.library = now
+        return f"Library look written. Snapshot from {taken} kept (Reader → Snapshots…).", now
 
     def _write_sleep(self, install: KOReaderInstall, data: bytes) -> str:
         """Add a sleep-screen picture to the reader's Photo folder, inside a snapshot."""

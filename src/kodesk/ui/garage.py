@@ -14,12 +14,11 @@ from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QImage
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -46,6 +45,8 @@ from kodesk.core.layout import (
     DEFAULT_T_MARGIN,
     book_layout,
 )
+from kodesk.core.librarymode import COVER_BROWSER, LibraryLook
+from kodesk.core.librarymode import label as mode_label
 from kodesk.core.luadump import KeyPath, LuaValue, SettingsDocument, changed_paths
 from kodesk.core.statusbar import (
     ALIGNMENTS,
@@ -67,14 +68,17 @@ from kodesk.core.statusbar import (
 )
 from kodesk.ui.device_view import DeviceView, Spot
 from kodesk.ui.extensions import ExtensionLock
+from kodesk.ui.library_panel import LibraryPanel, LibraryWriter
 from kodesk.ui.screen import (
     BookRenderer,
+    Shelf,
     fit_picture,
     render_library,
     render_menu,
     render_sleep,
     tab_bar_rect,
 )
+from kodesk.ui.sleep_panel import SleepDropPanel, SleepWriter
 
 
 class View(StrEnum):
@@ -109,6 +113,7 @@ class ReaderContext:
     source_label: str = "demo (no reader connected)"
     plugins: tuple[str, ...] = ()  # installed plugin names, e.g. "pbfixes"
     icons: dict[str, Path] = field(default_factory=dict)  # icon name → file on the reader
+    library: LibraryLook = field(default_factory=lambda: LibraryLook(COVER_BROWSER, None))
 
 
 def _segmented(labels: list[str], parent: QWidget) -> tuple[QWidget, QButtonGroup]:
@@ -257,7 +262,6 @@ class KeyPanel(QGroupBox):
 
 # Writes the edited settings to the reader; returns a short report for the status line.
 SettingsWriter = Callable[[SettingsDocument, SettingsDocument], str]
-SleepWriter = Callable[[bytes], str]  # PNG bytes → where on the reader they went
 
 
 class ChangesBox(QGroupBox):
@@ -299,6 +303,8 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         self.library_page = 0
         width, height = context.device.screen_px
         self.sleep_panel = SleepDropPanel(width, height, self)
+        self.library_panel = LibraryPanel(context.library, self)
+        self.library_panel.modeChanged.connect(self._library_mode_changed)
         self._renderer: BookRenderer | None = None
 
         self.device_view = DeviceView(context.device, self)
@@ -307,6 +313,7 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         self.status = QLabel(self)
         self.status.setObjectName("garage-status")
         self.status.setWordWrap(True)
+        self.library_panel.written.connect(self.status.setText)
         view_switch, self.view_group = _segmented([v.value for v in View], self)
         self.view_group.idClicked.connect(lambda index: self.set_view(list(View)[index]))
 
@@ -368,7 +375,7 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         scroll.setWidget(book)
         self.panels.addWidget(scroll)
         self.panels.addWidget(self._menu_panel())
-        self.panels.addWidget(self._library_panel())
+        self.panels.addWidget(self.library_panel)
         self.panels.addWidget(self.sleep_panel)
         self.changes_box.write_button.clicked.connect(self.write_changes)
         right = QWidget(self)
@@ -688,12 +695,6 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         form.addRow(details)
         return panel
 
-    def _info_panel(self, text: str) -> QWidget:
-        label = QLabel(text, self)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignmentFlag.AlignTop)
-        return label
-
     def _icons_extension(self) -> Extension | None:
         return installed_for(Area.ICONS, self.context.plugins)
 
@@ -756,13 +757,13 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
             ]
         return []
 
-    def _library_panel(self) -> QWidget:
-        text = (
-            "Your book folder as KOReader lists it in the classic list, measured from "
-            "KOReader's own code (menu.lua). Mosaic view and the Project: Title look are not "
-            "drawn yet."
-        )
-        return self._info_panel(text)
+    def _library_mode_changed(self) -> None:
+        self.library_page = 0
+        self.set_view(View.LIBRARY)
+
+    def set_library_writer(self, writer: LibraryWriter | None) -> None:
+        """Allow writing the library look (a connected reader with Cover browser on)."""
+        self.library_panel.set_writer(writer if self.context.library.drawer.cache else None)
 
     @property
     def dropped_sleep_image(self) -> QImage | None:
@@ -897,7 +898,9 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
             return render_menu(size, night, self._book().render(self.page), self.context.icons)
         if self.view is View.LIBRARY:
             entries = list(self.context.library_entries) or ["(no reader connected)"]
-            return render_library(size, night, entries, self.library_page)
+            look = self.library_panel.look
+            shelf = Shelf(self.library_panel.mode, look.grid, look.per_page)
+            return render_library(size, night, entries, self.library_page, shelf)
         if self.dropped_sleep_image is not None:
             return fit_picture(size, self.dropped_sleep_image)
         return render_sleep(size, self.context.sleep_image)
@@ -918,6 +921,9 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
             self.status.setText(
                 f"{self.context.device.name} · page {self.page + 1} of {book.page_count}"
             )
+        elif self.view is View.LIBRARY:
+            panel = self.library_panel
+            self.status.setText(f"Library · {mode_label(panel.look.drawer, panel.mode)}")
 
 
 def _short(value: LuaValue | None) -> str:
@@ -932,67 +938,3 @@ def _short(value: LuaValue | None) -> str:
         if isinstance(value, bool)
         else str(value)
     )
-
-
-class SleepDropPanel(QGroupBox):
-    """Drop zone for a sleep-screen picture, stating the exact target size."""
-
-    imageDropped = Signal(QImage)
-
-    def __init__(self, width: int, height: int, parent: QWidget | None = None) -> None:
-        super().__init__("Sleep screen", parent)
-        self.setAcceptDrops(True)
-        self.image: QImage | None = None
-        self.writer: SleepWriter | None = None
-        layout = QVBoxLayout(self)
-        self.hint = QLabel(
-            f"<p>Drop a picture here or choose one.</p><p><b>Best size: {width} × {height} px"
-            "</b> (portrait). Other sizes are scaled to fit, on white.</p>"
-            "<p>On PocketBook the firmware draws the sleep screen, not KOReader: kodesk "
-            "adds the picture to the reader's <code>Photo</code> folder; you then choose it "
-            "on the reader under Settings → Personalize → Logos.</p>",
-            self,
-        )
-        self.hint.setWordWrap(True)
-        self.hint.setTextFormat(Qt.TextFormat.RichText)
-        layout.addWidget(self.hint)
-        choose = QPushButton("&Choose picture…", self)
-        choose.setObjectName("sleep-choose")
-        choose.clicked.connect(self.choose)
-        self.write_button = QPushButton("&Put on reader…", self)
-        self.write_button.setObjectName("sleep-write")
-        self.write_button.setToolTip("Needs a connected PocketBook")
-        self.write_button.setEnabled(False)
-        row = QHBoxLayout()
-        row.addWidget(choose)
-        row.addWidget(self.write_button)
-        row.addStretch(1)
-        layout.addLayout(row)
-        layout.addStretch(1)
-
-    def enable_write(self) -> None:
-        self.write_button.setEnabled(self.writer is not None and self.image is not None)
-
-    def choose(self) -> None:
-        """The keyboard way to the drop zone: a file dialog for one picture."""
-        path, _filter = QFileDialog.getOpenFileName(
-            self, "Choose a picture", "", "Pictures (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
-        )
-        image = QImage(path) if path else QImage()
-        if not image.isNull():
-            self.imageDropped.emit(image)
-
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls() or event.mimeData().hasImage():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent) -> None:
-        data = event.mimeData()
-        image = QImage()
-        if data.hasImage():
-            image = QImage(data.imageData())
-        elif data.hasUrls():
-            image = QImage(data.urls()[0].toLocalFile())
-        if not image.isNull():
-            self.imageDropped.emit(image)
-            event.acceptProposedAction()
