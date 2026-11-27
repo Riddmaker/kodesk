@@ -26,7 +26,7 @@ import socket
 import struct
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from io import StringIO
 from pathlib import Path
@@ -71,6 +71,7 @@ class Pairing:
     user: str = DEFAULT_USER
     host_key: str | None = None  # base64 of the ed25519 public key blob; None: pin on contact
     host: str = ""  # the IP address used last
+    koreader_path: str = ""  # the KOReader folder as the reader names it (B-27); "": unknown
 
 
 def check_reader_id(reader_id: str) -> str:
@@ -288,6 +289,7 @@ def pair(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         pairing.user,
         host_key or pairing.host_key,
         pairing.host,
+        pairing.koreader_path,
     )
     keys.save(paired)
     return paired, snapshot
@@ -377,7 +379,7 @@ def connect(
                 "The reader does not accept kodesk's key. Pair it again over USB."
             ) from error
         pinned = pairing.host_key is None
-        current = Pairing(pairing.reader_id, pairing.name, pairing.port, user, seen, address)
+        current = replace(pairing, user=user, host_key=seen, host=address)
         if current != pairing:  # pinned now, or another address, port or user name
             keys.save(current)
         sftp = paramiko.SFTPClient.from_transport(transport)

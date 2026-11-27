@@ -75,7 +75,10 @@ def busy[T](action: Callable[[], T]) -> T:
 
 
 def with_snapshot_progress[T](
-    parent: QWidget | None, action: Callable[[Progress], T], then: str | None = WRITING
+    parent: QWidget | None,
+    action: Callable[[Progress], T],
+    then: str | None = WRITING,
+    label: str = TAKING,
 ) -> T:
     """Run ``action`` (a guarded write, or a snapshot alone) behind a modal progress dialog.
 
@@ -84,7 +87,7 @@ def with_snapshot_progress[T](
     and cannot be cancelled any more: a write is never stopped halfway. On the UI thread like
     :func:`busy`: a modal QProgressDialog processes events in ``setValue``, so Cancel works.
     """
-    dialog = QProgressDialog(TAKING, "Cancel", 0, STEPS, parent)
+    dialog = QProgressDialog(label, "Cancel", 0, STEPS, parent)
     dialog.setObjectName("snapshot-progress")
     dialog.setWindowTitle(APP_NAME)
     dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -95,7 +98,7 @@ def with_snapshot_progress[T](
     def report(done: int, total: int) -> None:
         if dialog.wasCanceled():
             raise SnapshotCancelledError
-        dialog.setLabelText(f"{TAKING}\n{human_size(done)} of {human_size(total)} read")
+        dialog.setLabelText(f"{label}\n{human_size(done)} of {human_size(total)} read")
         dialog.setValue(STEPS if done >= total else done * STEPS // max(total, 1))
         if dialog.wasCanceled():
             raise SnapshotCancelledError

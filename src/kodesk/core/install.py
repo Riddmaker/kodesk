@@ -18,6 +18,8 @@ KNOWN_LAYOUTS: tuple[tuple[str, str], ...] = (
     ("kindle", "koreader"),  # Android uses the same relative path on external storage
 )
 MAX_SETTINGS_BYTES = 8 * 1024 * 1024  # a settings file larger than this is not a real one
+# Where the USB volume is inside the reader itself (Wi-Fi, B-27); PocketBook as in home_dir.
+READER_VOLUMES = {"pocketbook": "/mnt/ext1", "kobo": "/mnt/onboard", "kindle": "/mnt/us"}
 
 
 class InstallError(Exception):
@@ -63,6 +65,25 @@ def volume_root(install: KOReaderInstall) -> Path:
     """The reader's USB volume the KOReader folder lives on (PocketBook: two levels up)."""
     relative = {"pocketbook": 2, "kobo": 2, "kindle": 1}.get(install.platform, 1)
     return install.root.parents[relative - 1]
+
+
+def reader_path(install: KOReaderInstall) -> str:
+    """The KOReader folder as the reader itself names it, e.g. /mnt/ext1/applications/koreader."""
+    volume = READER_VOLUMES.get(install.platform)
+    if volume is None:
+        raise InstallError(f"Wi-Fi is not supported on {install.platform} readers yet.")
+    return f"{volume}/{install.root.relative_to(volume_root(install)).as_posix()}"
+
+
+def home_folder(platform: str, settings: SettingsDocument) -> str:
+    """The books folder relative to the volume: KOReader's ``home_dir`` there, else ``Books``."""
+    home = settings.get(("home_dir",))
+    volume = READER_VOLUMES.get(platform)
+    if volume and isinstance(home, str) and home.startswith(volume + "/"):
+        relative = home.removeprefix(volume + "/").strip("/")
+        if relative and ".." not in relative.split("/"):
+            return relative
+    return "Books"
 
 
 def read_settings_file(path: Path) -> SettingsDocument:

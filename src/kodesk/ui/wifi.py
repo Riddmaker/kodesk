@@ -1,8 +1,8 @@
 """The Wi-Fi window (B-11): pair a reader over USB, then test the connection over Wi-Fi.
 
 Pairing writes one line on the reader (preview, snapshot first); testing connects in the
-background, so the window never freezes while the reader does not answer. What runs over
-Wi-Fi after the test (reading, installs, snapshots) comes with B-11b.
+background, so the window never freezes while the reader does not answer. Connect (B-27) brings
+kodesk's copy of the reader in step and shows it in the main window.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -26,7 +27,9 @@ from PySide6.QtWidgets import (
 )
 
 from kodesk.core import wifi
+from kodesk.core.install import InstallError
 from kodesk.core.luadump import SettingsDocument
+from kodesk.core.mirror import MirrorError, WifiReader
 from kodesk.core.snapshot import SnapshotError, SnapshotStore
 from kodesk.core.wifi import KeyStore, Pairing, WifiError
 from kodesk.ui.snapshots import with_snapshot_progress
@@ -43,6 +46,7 @@ KEY_ONLY_TIP = (
     "Tip: on the reader, switch on “Login with key only” (KOReader: Network → SSH server), "
     "so nobody can log in with a password."
 )
+READING = "Reading your reader over Wi-Fi (only what changed since last time)…"
 START_SSH = (
     "Start the SSH server on the reader (KOReader: Network → SSH server), type the IP "
     "address it shows, then test the connection."
@@ -58,13 +62,23 @@ class UsbReader:
     settings: SettingsDocument
     koreader_dir: Path
     store: SnapshotStore
+    koreader_path: str = ""  # the KOReader folder as the reader names it (install.reader_path)
 
 
 class WifiDialog(QDialog):  # pylint: disable=too-many-instance-attributes  # widgets
-    """Paired readers, pairing, connection test and forgetting a reader."""
+    """Paired readers, pairing, connection test, connecting and forgetting a reader."""
 
-    def __init__(self, keys: KeyStore, usb: UsbReader | None, parent: QWidget | None) -> None:
+    connected = Signal(object)  # a WifiReader whose mirror is in step
+
+    def __init__(
+        self,
+        keys: KeyStore,
+        usb: UsbReader | None,
+        parent: QWidget | None,
+        mirrors: Path | None = None,
+    ) -> None:
         super().__init__(parent)
+        self.mirrors = mirrors  # where the copies of readers live; None: no Connect
         self.setObjectName("wifi-dialog")
         self.setWindowTitle("Wi-Fi")
         self.keys, self.usb = keys, usb
@@ -95,9 +109,14 @@ class WifiDialog(QDialog):  # pylint: disable=too-many-instance-attributes  # wi
             form.addRow(text, widget)
         self.pair_button = self._button("&Pair over USB…", "wifi-pair", self.pair)
         self.test_button = self._button("&Test connection", "wifi-test", self.test)
+        self.connect_button = self._button("Co&nnect", "wifi-connect", self.connect_reader)
+        self.connect_button.setToolTip(
+            "Read the reader over Wi-Fi and show it; plugins and patches can then be changed"
+        )
         self.forget_button = self._button("&Forget this reader…", "wifi-forget", self.forget)
         row = QHBoxLayout()
-        for button in (self.pair_button, self.test_button, self.forget_button):
+        buttons = (self.pair_button, self.test_button, self.connect_button, self.forget_button)
+        for button in buttons:
             row.addWidget(button)
         row.addStretch(1)
         self.message = QLabel(self)
@@ -169,6 +188,7 @@ class WifiDialog(QDialog):  # pylint: disable=too-many-instance-attributes  # wi
         self.pair_button.setEnabled(on_usb)
         self.pair_button.setText("&Pair again over USB…" if pairing else "&Pair over USB…")
         self.test_button.setEnabled(pairing is not None)
+        self.connect_button.setEnabled(pairing is not None and self.mirrors is not None)
         leftover = (
             on_usb and self.reader_id() is not None and self.keys.leftover(self.reader_id() or "")
         )
@@ -194,7 +214,7 @@ class WifiDialog(QDialog):  # pylint: disable=too-many-instance-attributes  # wi
             return
         try:
             user = wifi.check_user(self.user.text().strip())
-            start = Pairing(usb.reader_id, usb.name, user=user)
+            start = Pairing(usb.reader_id, usb.name, user=user, koreader_path=usb.koreader_path)
             paired, _snapshot = with_snapshot_progress(
                 self,
                 lambda progress: wifi.pair(
@@ -229,6 +249,22 @@ class WifiDialog(QDialog):  # pylint: disable=too-many-instance-attributes  # wi
                 return f"Connected to {pairing.name} at {host} (folder {folder}).{first}"
 
         run_in_background(self._results, pairing.reader_id, work)
+
+    def connect_reader(self) -> None:
+        """Bring kodesk's copy of the reader in step over Wi-Fi, then show it."""
+        pairing = self.pairing()
+        if pairing is None or self.mirrors is None:
+            return
+        try:
+            user = wifi.check_user(self.user.text().strip())
+            trying = replace(pairing, port=self.port.value(), user=user)
+            reader = WifiReader.open(self.keys, trying, self.host.text(), self.mirrors)
+            with_snapshot_progress(self, reader.sync, None, READING)
+        except (WifiError, MirrorError, SnapshotError, InstallError, OSError) as error:
+            self.message.setText(f"Not connected: {error}")
+            return
+        self.connected.emit(reader)
+        self.accept()
 
     def _tested(self, _token: str, result: object) -> None:
         self.test_button.setEnabled(True)

@@ -210,6 +210,9 @@ class SnapshotStore:
         self.blobs = base / "blobs"
         self.manifests = base / "manifests"
         self._clock = clock or (lambda: datetime.now(UTC))
+        # Over Wi-Fi (B-27) the folder is a local mirror: this sends a finished change to the
+        # reader. It raises if it cannot; the mirror then matches the reader again.
+        self.publish: Callable[[], None] | None = None
 
     # -- taking ---------------------------------------------------------------------------
 
@@ -358,8 +361,8 @@ class SnapshotStore:
                 write.append(entry.path)
         return RestorePlan(tuple(sorted(write)), tuple(remove))
 
-    def restore(self, koreader_dir: Path, snapshot: Snapshot) -> RestorePlan:
-        """Bring the folder back to the snapshot byte for byte, then check it."""
+    def restore(self, koreader_dir: Path, snapshot: Snapshot, publish: bool = True) -> RestorePlan:
+        """Bring the folder back to the snapshot byte for byte, check it, then :attr:`publish`."""
         plan = self.plan_restore(koreader_dir, snapshot)
         wanted = {**snapshot.by_path(), **{e.path: e for e in snapshot.outside}}
         root = koreader_dir.resolve()
@@ -383,7 +386,16 @@ class SnapshotStore:
             raise SnapshotError(
                 f"restore of {snapshot.id} incomplete: {', '.join((*left.write, *left.remove))}"
             )
+        if publish and self.publish is not None and plan:
+            self._publish()
         return plan
+
+    def _publish(self) -> None:
+        assert self.publish is not None
+        try:
+            self.publish()
+        except Exception as error:  # pylint: disable=broad-exception-caught  # reported as such
+            raise SnapshotError(f"not written to the reader: {error}") from error
 
     @staticmethod
     def _inside(root: Path, path: str) -> Path:
@@ -444,13 +456,19 @@ def guarded_write(  # pylint: disable=too-many-arguments,too-many-positional-arg
     try:
         write()
     except Exception as error:  # pylint: disable=broad-exception-caught  # any failure: undo
-        store.restore(koreader_dir, snapshot)
+        store.restore(koreader_dir, snapshot, publish=False)
         raise WriteRejectedError(f"write failed and was undone ({error})", ()) from error
     changed = changed_protected(koreader_dir, snapshot, third_party, frozenset(allowed))
     if changed:
-        store.restore(koreader_dir, snapshot)
+        store.restore(koreader_dir, snapshot, publish=False)
         raise WriteRejectedError(
             "the write changed protected files, so it was undone: " + ", ".join(changed), changed
         )
+    if store.publish is not None:
+        try:
+            store.publish()
+        except Exception as error:  # pylint: disable=broad-exception-caught  # any failure: undo
+            store.restore(koreader_dir, snapshot, publish=False)
+            raise WriteRejectedError(f"not written to the reader ({error})", ()) from error
     healthcheck.remember(store.base, koreader_dir, snapshot.id)  # checked on the next connect
     return snapshot

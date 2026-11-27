@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -30,13 +30,16 @@ from kodesk.core.install import (
     InstallError,
     KOReaderInstall,
     find_install,
+    home_folder,
     read_settings_file,
+    reader_path,
     volume_root,
 )
 from kodesk.core.librarymode import LibraryLook, read_look, write_mode
 from kodesk.core.luadump import SettingsDocument
+from kodesk.core.mirror import WifiReader
 from kodesk.core.settings_write import Changes, write_documents
-from kodesk.core.sleepscreen import PHOTO_DIR, PLATFORMS, place_picture
+from kodesk.core.sleepscreen import PHOTO_DIR, PLATFORMS, SLEEP_LOGO, place_picture
 from kodesk.core.snapshot import SnapshotStore, device_id, guarded_write
 from kodesk.core.volume import volume_serial
 from kodesk.core.wifi import KeyStore
@@ -59,19 +62,27 @@ def demo_context() -> ReaderContext:
     return ReaderContext(device=DEVICES[DEMO_DEVICE], settings=SettingsDocument.parse("return {}"))
 
 
+def library_names(entries: Iterable[tuple[str, bool]]) -> tuple[str, ...]:
+    """Folder and book names as the library shows them, from (name, is a folder) pairs."""
+    shown = sorted(
+        (
+            (name, folder)
+            for name, folder in entries
+            if (folder and not name.endswith(".sdr"))
+            or (not folder and Path(name).suffix.lower() in BOOK_SUFFIXES)
+        ),
+        key=lambda entry: (not entry[1], entry[0].lower()),
+    )
+    return tuple(
+        f"{name}/" if folder else Path(name).stem for name, folder in shown[:MAX_LIBRARY_ENTRIES]
+    )
+
+
 def _library_entries(home: Path) -> tuple[str, ...]:
     """Folder and book names in the reader's home folder (names only, read-only)."""
     if not home.is_dir():
         return ()
-    entries = sorted(
-        (
-            p
-            for p in home.iterdir()
-            if (p.is_dir() and not p.name.endswith(".sdr")) or p.suffix.lower() in BOOK_SUFFIXES
-        ),
-        key=lambda p: (not p.is_dir(), p.name.lower()),
-    )
-    return tuple(f"{p.name}/" if p.is_dir() else p.stem for p in entries[:MAX_LIBRARY_ENTRIES])
+    return library_names((p.name, p.is_dir()) for p in home.iterdir())
 
 
 def menu_icons(koreader_root: Path) -> dict[str, Path]:
@@ -86,31 +97,37 @@ def _gestures(koreader_root: Path) -> SettingsDocument | None:
     return read_settings_file(path) if path.is_file() else None
 
 
-def reader_context(install: KOReaderInstall) -> ReaderContext:
-    """Read everything the garage shows from a connected reader."""
+def reader_context(
+    install: KOReaderInstall,
+    library: tuple[str, ...] | None = None,
+    source: str | None = None,
+) -> ReaderContext:
+    """Read everything the garage shows from a reader (over Wi-Fi: its mirror, B-27).
+
+    ``library`` replaces the book names read from the volume (a mirror has no books);
+    ``source`` replaces the line saying where the reader is.
+    """
     if install.device is None:
         raise InstallError(
             f"Reader model {install.model or 'unknown'} has no device definition yet."
         )
     volume = volume_root(install)
     settings = install.read_settings()
-    home = settings.get(("home_dir",))
-    home_path = volume / "Books"
-    if isinstance(home, str) and home.startswith("/mnt/ext1/"):  # PocketBook internal storage
-        home_path = volume / home.removeprefix("/mnt/ext1/")
-    sleep = volume / "system/logo/sleeplogo/pb_sleeplogo.bmp"
+    if library is None:
+        library = _library_entries(volume / home_folder(install.platform, settings))
+    sleep = volume / SLEEP_LOGO
     return ReaderContext(
         device=install.device,
         settings=settings,
         koreader_version=install.version,
         font_families=tuple(load_device_fonts(install.fonts_dir)),
-        library_entries=_library_entries(home_path),
+        library_entries=library,
         sleep_image=sleep if sleep.is_file() else None,
         plugins=install.plugins(),
         icons=menu_icons(install.root),
         gestures=_gestures(install.root),
         library=read_look(install.root, settings, install.plugins()),
-        source_label=f"KOReader {install.version or '?'} on {volume}",
+        source_label=source or f"KOReader {install.version or '?'} on {volume}",
     )
 
 
@@ -161,6 +178,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.install: KOReaderInstall | None = None
+        self.wifi: WifiReader | None = None  # the reader shown is reached over Wi-Fi (B-27)
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
@@ -172,7 +190,7 @@ class MainWindow(QMainWindow):
             self,
             None if offline else catalogue.https_get,
             self._catalogue,
-            snapshot_store,
+            self.store_for,
             self.reread,
         )
         self.store.install_requested.connect(self.changes.install_entry)
@@ -184,7 +202,7 @@ class MainWindow(QMainWindow):
             self,
             None if offline else net.https_get,
             None if offline else net.https_save,
-            snapshot_store,
+            self.store_for,
             self.reread_install,
             self.changes.remove,
         )
@@ -196,13 +214,7 @@ class MainWindow(QMainWindow):
         open_action = QAction("&Open reader…", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.choose_reader)
-        quit_action = QAction("&Quit", self)
-        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        quit_action.triggered.connect(self.close)
-        file_menu = self.menuBar().addMenu("&File")
-        file_menu.addAction(open_action)
-        file_menu.addSeparator()
-        file_menu.addAction(quit_action)
+        self._file_menu(open_action)
         self.snapshots_action = QAction("&Snapshots…", self)
         self.snapshots_action.triggered.connect(self.show_snapshots)
         self.koreader_action = QAction("Update &KOReader…", self)
@@ -222,11 +234,21 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.snapshots_button)
         self.set_context(context, install)
 
+    def _file_menu(self, open_action: QAction) -> None:
+        quit_action = QAction("&Quit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(self.close)
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction(open_action)
+        file_menu.addSeparator()
+        file_menu.addAction(quit_action)
+
     def set_context(self, context: ReaderContext, install: KOReaderInstall | None = None) -> None:
         """Show a reader (or the demo); snapshots only exist for a real reader."""
         self.install = install
+        wifi = self._over_wifi(install)
         self.snapshots_action.setEnabled(install is not None)
-        self.koreader_action.setEnabled(install is not None)
+        self.koreader_action.setEnabled(install is not None and not wifi)
         self.snapshots_button.setVisible(install is not None)
         old: QWidget | None = getattr(self, "garage", None)
         self.garage = TuningGarage(context, self)
@@ -237,10 +259,10 @@ class MainWindow(QMainWindow):
         self.garage.storeRequested.connect(self.show_in_store)
         self.tabs.setCurrentIndex(0)
         self.changes.install = install
-        self.koupdate.install = install
+        self.koupdate.install = None if wifi else install  # an update needs USB (B-27)
         self.reread()
         self.statusBar().showMessage(context.source_label)
-        if install is not None:
+        if install is not None and not wifi:  # over Wi-Fi the Garage shows only (B-26)
             self.garage.set_writer(lambda changes: self._write_settings(install, changes))
             if install.platform in PLATFORMS:
                 self.garage.set_sleep_writer(lambda data: self._write_sleep(install, data))
@@ -254,6 +276,7 @@ class MainWindow(QMainWindow):
 
     def show_reader(self, install: KOReaderInstall | None) -> str | None:
         """Show ``install`` (None: the demo reader); an error message if it cannot be shown."""
+        self.wifi = None
         if install is None:
             self.set_context(demo_context(), None)
             return None
@@ -262,6 +285,36 @@ class MainWindow(QMainWindow):
         except (InstallError, OSError) as error:
             return str(error)
         return None
+
+    def show_wifi_reader(self, wifi: WifiReader) -> str | None:
+        """Show a reader reached over Wi-Fi: its mirror, freshly brought in step (B-27)."""
+        try:
+            install = wifi.install()
+            source = (
+                f"KOReader {install.version or '?'} over Wi-Fi ({wifi.host}) · "
+                "the Garage only shows your settings here; change them over USB"
+            )
+            context = reader_context(install, library_names(wifi.books), source)
+        except (InstallError, OSError) as error:
+            return str(error)
+        self.wifi = wifi
+        self.set_context(context, install)
+        return None
+
+    def _over_wifi(self, install: KOReaderInstall | None) -> bool:
+        return (
+            install is not None
+            and self.wifi is not None
+            and install.root == self.wifi.mirror.koreader_dir
+        )
+
+    def store_for(self, install: KOReaderInstall) -> SnapshotStore:
+        """The reader's snapshots; over Wi-Fi each finished change is sent to the reader."""
+        if self.wifi is None or not self._over_wifi(install):
+            return snapshot_store(install)
+        store = SnapshotStore(_app_data() / "snapshots" / self.wifi.pairing.reader_id)
+        store.publish = self.wifi.publish
+        return store
 
     def watch_readers(self, lister: Lister = mounted_readers) -> ReaderWatcher:
         """Follow readers being plugged in and out (Reader → Connected readers)."""
@@ -311,7 +364,7 @@ class MainWindow(QMainWindow):
             self.store.search.setFocus()
 
     def _write_settings(self, install: KOReaderInstall, changes: Changes) -> str:
-        store = snapshot_store(install)
+        store = self.store_for(install)
         snapshot = with_snapshot_progress(
             self, lambda progress: write_documents(store, install.root, changes, progress)
         )
@@ -322,7 +375,7 @@ class MainWindow(QMainWindow):
         self, install: KOReaderInstall, rows: dict[str, str | None]
     ) -> tuple[str, LibraryLook]:
         """Write the library look into the plugin's cache, inside a snapshot."""
-        store = snapshot_store(install)
+        store = self.store_for(install)
         look = self.garage.context.library
         snapshot = with_snapshot_progress(
             self,
@@ -337,7 +390,7 @@ class MainWindow(QMainWindow):
 
     def _write_sleep(self, install: KOReaderInstall, data: bytes) -> str:
         """Add a sleep-screen picture to the reader's Photo folder, inside a snapshot."""
-        store = snapshot_store(install)
+        store = self.store_for(install)
         placed: list[Path] = []
 
         def write() -> None:
@@ -357,7 +410,7 @@ class MainWindow(QMainWindow):
         return self.koupdate.interrupted(self.offer_restore) or self._check_log(self.install)
 
     def _check_log(self, install: KOReaderInstall) -> QMessageBox | None:
-        store = snapshot_store(install)
+        store = self.store_for(install)
         pending = healthcheck.load_pending(store.base)
         if pending is None:
             return None
@@ -414,22 +467,37 @@ class MainWindow(QMainWindow):
     def show_wifi(self) -> WifiDialog:
         """Pair the reader over USB and test Wi-Fi (B-11)."""
         usb = None
-        if self.install is not None:
+        if self.install is not None and not self._over_wifi(self.install):
             store = snapshot_store(self.install)
             device = self.install.device
             name = device.name if device else f"Reader {self.install.model or ''}".strip()
+            try:
+                where = reader_path(self.install)
+            except InstallError:
+                where = ""  # pairing works; Wi-Fi then says the platform is not supported
             usb = UsbReader(
-                store.base.name, name, self.install.read_settings(), self.install.root, store
+                store.base.name,
+                name,
+                self.install.read_settings(),
+                self.install.root,
+                store,
+                where,
             )
-        dialog = WifiDialog(key_store(), usb, self)
+        dialog = WifiDialog(key_store(), usb, self, _app_data() / "mirror")
+        dialog.connected.connect(self._wifi_connected)
         dialog.open()
         return dialog
+
+    def _wifi_connected(self, wifi: WifiReader) -> None:
+        error = self.show_wifi_reader(wifi)
+        if error:
+            QMessageBox.warning(self, APP_NAME, error)
 
     def show_snapshots(self) -> SnapshotsDialog | None:
         """Open the Snapshots window for the connected reader."""
         if self.install is None:
             return None
-        dialog = SnapshotsDialog(snapshot_store(self.install), self.install.root, self)
+        dialog = SnapshotsDialog(self.store_for(self.install), self.install.root, self)
         dialog.open()
         return dialog
 

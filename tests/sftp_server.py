@@ -2,7 +2,8 @@
 
 It behaves like KOReader's dropbear as far as kodesk cares: an ed25519 host key, key login
 against an authorized_keys file, optionally KOReader's "no password" mode (any password, even
-an empty one, logs in), and read-only SFTP of one folder.
+an empty one, logs in), and SFTP of one folder: read-only unless ``writable``. Like OpenSSH's
+``sftp-server`` (SFTP v3), a rename never replaces an existing file.
 """
 
 from __future__ import annotations
@@ -12,11 +13,12 @@ import os
 import socket
 import struct
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
+from typing import IO
 
 import paramiko
 from cryptography.hazmat.primitives import serialization
@@ -27,6 +29,7 @@ from paramiko.common import (
     OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED,
     OPEN_SUCCEEDED,
 )
+from paramiko.sftp import SFTP_OK, SFTP_PERMISSION_DENIED
 
 
 def new_host_key() -> tuple[paramiko.Ed25519Key, bytes]:
@@ -57,6 +60,7 @@ class FakeReader:
     host_key: paramiko.Ed25519Key
     user: str = "reader"
     no_password: bool = False  # KOReader's "allow no password" (-n)
+    writable: bool = False
     logins: list[str] = field(default_factory=list)
 
     def allowed(self) -> set[str]:
@@ -91,10 +95,30 @@ class _Server(paramiko.ServerInterface):
         return OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
 
-class _ReadOnlySftp(paramiko.SFTPServerInterface):
+class _Handle(paramiko.SFTPHandle):
+    """One open file; paramiko reads and writes through ``readfile`` and ``writefile``."""
+
+    def __init__(self, flags: int, stream: IO[bytes]) -> None:
+        super().__init__(flags)
+        self.readfile = self.writefile = stream
+
+    def stat(self) -> paramiko.SFTPAttributes | int:
+        return paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
+
+
+def _done(action: Callable[[], object]) -> int:
+    try:
+        action()
+    except OSError as error:
+        return paramiko.SFTPServer.convert_errno(error.errno or 2)
+    return SFTP_OK
+
+
+class _Sftp(paramiko.SFTPServerInterface):
     def __init__(self, server: _Server, *args: object, **kwargs: object) -> None:
         super().__init__(server, *args, **kwargs)
         self.root = server.reader.root
+        self.writable = server.reader.writable
 
     def _local(self, path: str) -> Path:
         local = (self.root / path.lstrip("/")).resolve()
@@ -109,7 +133,7 @@ class _ReadOnlySftp(paramiko.SFTPServerInterface):
         try:
             folder = self._local(path)
             return [
-                paramiko.SFTPAttributes.from_stat(child.stat(), child.name)
+                paramiko.SFTPAttributes.from_stat(child.lstat(), child.name)  # as sftp-server
                 for child in sorted(folder.iterdir())
             ]
         except OSError as error:
@@ -121,7 +145,48 @@ class _ReadOnlySftp(paramiko.SFTPServerInterface):
         except OSError as error:
             return paramiko.SFTPServer.convert_errno(error.errno or 2)
 
-    lstat = stat
+    def lstat(self, path: str) -> paramiko.SFTPAttributes | int:
+        try:
+            return paramiko.SFTPAttributes.from_stat(self._local(path).lstat())
+        except OSError as error:
+            return paramiko.SFTPServer.convert_errno(error.errno or 2)
+
+    def open(
+        self, path: str, flags: int, attr: paramiko.SFTPAttributes
+    ) -> paramiko.SFTPHandle | int:
+        writing = flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)
+        if writing and not self.writable:
+            return SFTP_PERMISSION_DENIED
+        try:
+            local = self._local(path)
+            fd = os.open(local, flags, 0o644)
+        except OSError as error:
+            return paramiko.SFTPServer.convert_errno(error.errno or 2)
+        mode = "rb" if not writing else ("ab" if flags & os.O_APPEND else "wb")
+        if flags & os.O_RDWR:
+            mode = "r+b"
+        return _Handle(flags, os.fdopen(fd, mode))
+
+    def _change(self, action: Callable[[], object]) -> int:
+        return _done(action) if self.writable else SFTP_PERMISSION_DENIED
+
+    def remove(self, path: str) -> int:
+        return self._change(lambda: self._local(path).unlink())
+
+    def rename(self, oldpath: str, newpath: str) -> int:
+        def move() -> None:
+            target = self._local(newpath)
+            if target.exists():
+                raise FileExistsError(17, "exists", str(target))
+            self._local(oldpath).rename(target)
+
+        return self._change(move)
+
+    def mkdir(self, path: str, attr: paramiko.SFTPAttributes) -> int:
+        return self._change(lambda: self._local(path).mkdir())
+
+    def rmdir(self, path: str) -> int:
+        return self._change(lambda: self._local(path).rmdir())
 
 
 @contextmanager
@@ -143,7 +208,7 @@ def serve(reader: FakeReader) -> Iterator[int]:
                 return
             transport = paramiko.Transport(client)
             transport.add_server_key(reader.host_key)
-            transport.set_subsystem_handler("sftp", paramiko.SFTPServer, _ReadOnlySftp)
+            transport.set_subsystem_handler("sftp", paramiko.SFTPServer, _Sftp)
             transports.append(transport)
             with suppress(paramiko.SSHException, EOFError, OSError):
                 transport.start_server(server=_Server(reader))
