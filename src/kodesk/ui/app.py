@@ -268,9 +268,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(context.source_label)
         self.remote_garage = None
         if install is not None and wifi and self.wifi is not None:  # B-26
-            remote = WifiGarage(
-                self, install, self.store_for(install), self.wifi.mirror.base / SEEN
-            )
+            store = self.store_for(install)
+            remote = WifiGarage(self, install, store, store.base / SEEN)
             self.remote_garage = remote
             self.garage.set_writer(remote.send_settings, WIFI_HINT)
             self.garage.set_library_writer(lambda rows: self._send_library(remote, rows), WIFI_HINT)
@@ -280,6 +279,19 @@ class MainWindow(QMainWindow):
                 self.garage.set_sleep_writer(lambda data: self._write_sleep(install, data))
             self.garage.set_library_writer(lambda rows: self._write_library(install, rows))
             QTimer.singleShot(0, self.check_health)
+            QTimer.singleShot(0, self.check_wifi_changes)
+
+    def check_wifi_changes(self) -> tuple[QMessageBox | None, QMessageBox | None]:
+        """Over USB: what KOReader did with changes sent over Wi-Fi, and those still waiting
+        (B-26)."""
+        if self.install is None or self._over_wifi(self.install):
+            return None, None
+        try:
+            store = snapshot_store(self.install)
+        except OSError:
+            return None, None
+        usb = WifiGarage(self, self.install, store, store.base / SEEN)
+        return usb.show_result(), usb.show_waiting()
 
     def show_in_store(self, search: str, select: str) -> None:
         """The Store with ``search`` filled in (from a locked place in the Garage)."""

@@ -64,6 +64,9 @@ def test_summary_never_guesses_the_origin() -> None:
 def test_patch_states() -> None:
     assert patch_row(Patch("0-x.lua", "0", True))[2] == "Runs after the next update"
     assert patch_row(Patch("2-x.lua", "2", False))[2] == "Not run: all patches are switched off"
+    assert (
+        patch_row(Patch("1-kodesk-apply.lua", "1", True))[1] == "kodesk: Garage changes over Wi-Fi"
+    )
     assert patch_row(Patch("x.lua", None, False))[2].startswith("Not run: name does not")
 
 

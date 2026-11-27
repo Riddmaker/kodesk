@@ -24,6 +24,7 @@ from kodesk.core.catalogue import Entry, Kind
 from kodesk.core.install import InstallError, KOReaderInstall
 from kodesk.core.inventory import RUN_PRIORITIES, Origin, Patch, Plugin, list_patches, list_plugins
 from kodesk.core.records import Record
+from kodesk.core.remote_garage import PATCH_NAME as KODESK_PATCH
 from kodesk.core.sources import probable_sources
 
 COLUMNS = ("Name", "Origin", "State", "Source", "Update")
@@ -53,7 +54,8 @@ def patch_row(patch: Patch) -> tuple[str, str, str]:
         state = "Not run: name does not start with a priority digit and a dash"
     else:
         state = f"Not run: priority {patch.priority} is reserved"
-    return patch.name, "Added by you", state
+    origin = "kodesk: Garage changes over Wi-Fi" if patch.name == KODESK_PATCH else "Added by you"
+    return patch.name, origin, state
 
 
 def source_text(record: Record | None, guesses: tuple[Entry, ...]) -> str:

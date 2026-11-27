@@ -28,6 +28,9 @@ from kodesk.core.archive import PLUGIN_SUFFIX, ArchiveError, StagedPlugin, safe_
 from kodesk.core.catalogue import Entry, Kind
 from kodesk.core.inventory import RUN_PRIORITIES, built_in_plugins, patch_priority
 from kodesk.core.records import Record, Records
+from kodesk.core.remote_garage import FOLDER as KODESK_FOLDER
+from kodesk.core.remote_garage import PATCH_NAME as KODESK_PATCH
+from kodesk.core.remote_garage import PENDING
 from kodesk.core.snapshot import (
     Progress,
     Snapshot,
@@ -242,6 +245,8 @@ def plan_remove(koreader_dir: Path, kind: Kind, name: str, record: Record | None
         target = f"{PATCHES}/{name}"
         if not (koreader_dir / target).is_file() or (koreader_dir / target).is_symlink():
             raise InstallerError(f"{target} is not on the reader")
+        if name == KODESK_PATCH:
+            return _remove_kodesk_patch(koreader_dir, target)
         return Change(Action.REMOVE, kind, name, target, remove=(target,))
     target = f"{PLUGINS}/{name}{PLUGIN_SUFFIX}"
     folder = koreader_dir / target
@@ -251,6 +256,24 @@ def plan_remove(koreader_dir: Path, kind: Kind, name: str, record: Record | None
     files = tuple(f"{target}/{p}" for p in _files(folder))
     notes = ("Its settings (in settings/ on the reader) stay, in case you install it again.",)
     return Change(Action.REMOVE, kind, name, target, remove=files, notes=notes)
+
+
+def _remove_kodesk_patch(koreader_dir: Path, target: str) -> Change:
+    """kodesk's own patch (B-26) goes with its folder: change file, result and backups."""
+    folder = koreader_dir / KODESK_FOLDER
+    if folder.is_symlink():
+        raise InstallerError(f"symbolic link on the reader: {folder}")
+    files = tuple(f"{KODESK_FOLDER}/{p}" for p in _files(folder))
+    notes = [
+        "This is kodesk's patch for Garage changes over Wi-Fi. Its folder kodesk/ goes too "
+        "(the change file, KOReader's last result and the backups of earlier changes)."
+    ]
+    if (koreader_dir / PENDING).is_file():
+        notes.append("Changes sent over Wi-Fi that KOReader has not applied yet are dropped.")
+    notes.append("kodesk asks before it puts the patch back with the next change over Wi-Fi.")
+    return Change(
+        Action.REMOVE, Kind.PATCH, KODESK_PATCH, target, remove=(target, *files), notes=tuple(notes)
+    )
 
 
 def write_file(target: Path, data: bytes | Path) -> None:
@@ -284,12 +307,13 @@ def apply(
     """Snapshot, write ``change``, verify; the snapshot is restored if anything goes wrong."""
     root = koreader_dir.resolve()
 
+    folders = [(PLUGINS,), (PATCHES,)]
+    if change.action is Action.REMOVE and change.kind is Kind.PATCH and change.name == KODESK_PATCH:
+        folders.append((KODESK_FOLDER,))
+
     def inside(path: str) -> Path:
         target = (koreader_dir / path).resolve()
-        if not target.is_relative_to(root) or PurePosixPath(path).parts[:1] not in (
-            (PLUGINS,),
-            (PATCHES,),
-        ):
+        if not target.is_relative_to(root) or PurePosixPath(path).parts[:1] not in folders:
             raise InstallerError(f"refusing to write outside plugins/ and patches/: {path}")
         return koreader_dir / path
 
@@ -313,6 +337,8 @@ def apply(
             inside(path).unlink()
         if change.kind is Kind.PLUGIN:
             _remove_empty_dirs(koreader_dir / change.target, change.action is Action.REMOVE)
+        elif (KODESK_FOLDER,) in folders:
+            _remove_empty_dirs(koreader_dir / KODESK_FOLDER, True)
 
     allowed = {change.target + "/" if change.kind is Kind.PLUGIN else change.target}
     snapshot = guarded_write(store, koreader_dir, write, allowed, progress=progress)

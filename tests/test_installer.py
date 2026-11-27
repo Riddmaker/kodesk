@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from kodesk.core import catalogue as cat
+from kodesk.core import remote_garage as rg
 from kodesk.core.archive import StagedPlugin, stage_plugin
 from kodesk.core.installer import (
     Action,
@@ -141,3 +142,28 @@ def test_a_failing_write_is_undone(reader: Path, store: SnapshotStore, tmp_path:
         apply(store, reader, change, records)
     assert not (reader / "plugins" / "readingclock.koplugin").exists()
     assert records.get(cat.Kind.PLUGIN, "readingclock") is None
+
+
+def test_removing_kodesks_patch_takes_its_folder(reader: Path, store: SnapshotStore) -> None:
+    """B-26: kodesk's own patch goes with kodesk/ (change file, result, backups), nothing else."""
+    (reader / rg.PATCH).write_bytes(rg.patch_source("0.1.0"))
+    for path in (rg.PENDING, rg.RESULT, f"{rg.FOLDER}/backup/a-1/settings.reader.lua"):
+        (reader / path).parent.mkdir(parents=True, exist_ok=True)
+        (reader / path).write_text("x")
+    before = _hashes(reader)
+    change = plan_remove(reader, cat.Kind.PATCH, rg.PATCH_NAME, None)
+    assert change.remove == (
+        rg.PATCH,
+        f"{rg.FOLDER}/backup/a-1/settings.reader.lua",
+        rg.PENDING,
+        rg.RESULT,
+    )
+    assert any("not applied yet are dropped" in n for n in change.notes)
+    apply(store, reader, change, Records(store.base))
+    assert not (reader / rg.PATCH).exists() and not (reader / rg.FOLDER).exists()
+    assert (reader / "patches" / USER_PATCH).is_file()
+    assert _hashes(reader) == before
+    (reader / rg.PATCH).write_bytes(b"--")  # without kodesk/: only the patch, no note on changes
+    change = plan_remove(reader, cat.Kind.PATCH, rg.PATCH_NAME, None)
+    assert change.remove == (rg.PATCH,)
+    assert not any("dropped" in n for n in change.notes)

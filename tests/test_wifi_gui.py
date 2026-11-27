@@ -15,12 +15,13 @@ from pytestqt.qtbot import QtBot
 from kodesk import __version__
 from kodesk.core import catalogue as cat
 from kodesk.core import remote_garage as rg
+from kodesk.core.install import find_install
 from kodesk.core.luadump import SettingsDocument
 from kodesk.core.mirror import WifiReader
 from kodesk.core.remote_garage import PatchState
 from kodesk.core.snapshot import SnapshotStore
 from kodesk.core.wifi import AUTHORIZED_KEYS, KeyStore
-from kodesk.ui.app import MainWindow, demo_context
+from kodesk.ui.app import MainWindow, demo_context, reader_context
 from kodesk.ui.garage import TuningGarage
 from kodesk.ui.wifi import KEY_ONLY_TIP, NOT_PAIRED, UsbReader, WifiDialog
 from kodesk.ui.wifi_garage import WifiGarage
@@ -201,3 +202,35 @@ def test_garage_changes_over_wifi_wait_for_koreader(
         assert remote.undo(rg.read_result((koreader / rg.RESULT).read_bytes()))
         undone = rg.read_pending((koreader / rg.PENDING).read_bytes())
         assert undone == [rg.Change("reader", ("copt_font_size",), old + 6, old)]
+
+
+def test_usb_connect_shows_the_result_and_drops_waiting_changes(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B-26 over USB: the result KOReader left is shown once, and changes still waiting for
+    KOReader can be kept or dropped (inside a snapshot)."""
+    QStandardPaths.setTestModeEnabled(True)
+    dialogs = Dialogs(monkeypatch)
+    koreader = make_reader(tmp_path / "PB634K3", "pocketbook")
+    (koreader / "version.log").write_text("2026-08-26, 08:01:22, v2026.07.2, PBVerseProColor\n")
+    install = find_install(koreader)
+    main = MainWindow(reader_context(install), install, offline=True)
+    qtbot.addWidget(main)
+    applied = rg.Change("reader", ("copt_font_size",), 22, 26)
+    waiting = rg.Change("reader", ("copt_line_spacing",), 100, 110)
+    (koreader / rg.FOLDER).mkdir()
+    result = {"format": 1, "id": "a-1", "applied": [applied.to_json()], "skipped": {}}
+    (koreader / rg.RESULT).write_text(json.dumps(result))
+    (koreader / rg.PENDING).write_bytes(rg.pending_document(rg.new_id(), [waiting]))
+    shown, asked = main.check_wifi_changes()
+    assert shown is not None and "applied 1 setting" in shown.text()
+    assert asked is not None and "1 setting sent over Wi-Fi still waits" in asked.text()
+    assert waiting.label() in asked.detailedText()
+    assert main.check_wifi_changes()[0] is None  # the result is shown once
+    drop = next(b for b in asked.buttons() if b.text() == "&Drop them")
+    drop.click()
+    qtbot.waitUntil(lambda: bool(dialogs.messages))
+    assert dialogs.messages == ["Dropped: KOReader will not apply the changes sent over Wi-Fi."]
+    assert not (koreader / rg.PENDING).exists()
+    assert (koreader / rg.RESULT).is_file()
+    assert main.check_wifi_changes() == (None, None)

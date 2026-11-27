@@ -5,6 +5,8 @@ The Garage and the Library panel call :meth:`WifiGarage.send_settings` and
 (and, after the user agreed, the patch that applies it) into the reader's mirror inside a
 snapshot; the snapshot store then sends the files to the reader (B-27). KOReader applies the
 changes when it starts again; the next connect shows the outcome once (:meth:`show_result`).
+A connect over USB shows it as well, and offers to drop changes that still wait
+(:meth:`show_waiting`).
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ HINT = (
     "KOReader keeps running: it applies the changes when it starts again. On the reader: "
     "Exit → Restart KOReader."
 )
-SEEN = "result-seen"  # beside the mirror: the result.json already shown (its SHA-256)
+SEEN = "result-seen"  # in the reader's snapshot folder: the result.json already shown (SHA-256)
 MAX_LISTED = 30
 
 
@@ -143,6 +145,55 @@ class WifiGarage:
         count = f"{len(changes)} change{'s' if len(changes) != 1 else ''}"
         return f"Sent: {count} wait for KOReader. On the reader: Exit → Restart KOReader."
 
+    def show_waiting(self) -> QMessageBox | None:
+        """Over USB: changes sent over Wi-Fi that KOReader has not applied yet; keep or drop."""
+        waiting = self.waiting()
+        if not waiting:
+            return None
+        box = QMessageBox(self.parent)
+        box.setObjectName("wifi-waiting")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(APP_NAME)
+        count = len(waiting)
+        box.setText(
+            f"{count} setting{'s' if count != 1 else ''} sent over Wi-Fi still "
+            f"wait{'s' if count == 1 else ''} for KOReader."
+        )
+        box.setInformativeText(
+            "KOReader applies them at its next start. A setting you change over USB before "
+            "that is left alone then."
+        )
+        box.setDetailedText("\n".join(c.label() for c in waiting[:MAX_LISTED]))
+        box.addButton("&Keep them", QMessageBox.ButtonRole.AcceptRole)
+        drop = box.addButton("&Drop them", QMessageBox.ButtonRole.DestructiveRole)
+        box.finished.connect(lambda _r: box.clickedButton() is drop and self.drop())
+        box.open()
+        return box
+
+    def drop(self) -> str | None:
+        """Delete the waiting change file (after a snapshot): KOReader then applies nothing."""
+        pending = self.koreader / PENDING
+        try:
+            with_snapshot_progress(
+                self.parent,
+                lambda progress: guarded_write(
+                    self.store,
+                    self.koreader,
+                    lambda: pending.unlink(missing_ok=True),
+                    (),
+                    (),
+                    progress,
+                ),
+            )
+        except SnapshotCancelledError:
+            return None
+        except Exception as error:  # pylint: disable=broad-exception-caught  # shown, not raised
+            QMessageBox.warning(self.parent, APP_NAME, f"Nothing was dropped: {error}")
+            return None
+        report = "Dropped: KOReader will not apply the changes sent over Wi-Fi."
+        QMessageBox.information(self.parent, APP_NAME, report)
+        return report
+
     def consent(self, state: PatchState) -> bool:
         """Third-party code on the reader: name it, its source and version, then ask."""
         box = QMessageBox(self.parent)
@@ -195,6 +246,7 @@ class WifiGarage:
         except RemoteGarageError as error:
             result = Result("?", error=f"kodesk cannot read {RESULT} ({error})")
         with suppress(OSError):
+            self.seen.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             self.seen.write_text(digest, encoding="ascii")
         return self._result_box(result)
 
