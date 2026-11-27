@@ -47,7 +47,7 @@ from kodesk.ui.changes import ChangeRunner
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.installed import InstalledPage
 from kodesk.ui.koupdate import KOReaderUpdater
-from kodesk.ui.readers import Lister, ReaderWatcher, mounted_readers
+from kodesk.ui.readers import BareLister, Lister, ReaderWatcher, bare_readers, mounted_readers
 from kodesk.ui.screen import load_device_fonts
 from kodesk.ui.snapshots import SnapshotsDialog, busy, with_snapshot_progress
 from kodesk.ui.store import StorePage
@@ -350,11 +350,13 @@ class MainWindow(QMainWindow):
         store.publish = self.wifi.publish
         return store
 
-    def watch_readers(self, lister: Lister = mounted_readers) -> ReaderWatcher:
+    def watch_readers(
+        self, lister: Lister = mounted_readers, bare: BareLister = bare_readers
+    ) -> ReaderWatcher:
         """Follow readers being plugged in and out (Reader → Connected readers)."""
         self.reader_menu.addSeparator()
         menu = self.reader_menu.addMenu("&Connected readers")
-        self.watcher = ReaderWatcher(self, menu, lister)
+        self.watcher = ReaderWatcher(self, menu, lister, bare)
         self.watcher.start()
         return self.watcher
 

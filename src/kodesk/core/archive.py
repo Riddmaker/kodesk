@@ -227,10 +227,14 @@ def _release_members(
 
 
 def stage_release(
-    archive_path: Path, staging: Path, accepted: tuple[str, ...], skipped: tuple[str, ...]
+    archive_path: Path,
+    staging: Path,
+    accepted: tuple[str, ...],
+    skipped: tuple[str, ...],
+    unlisted: tuple[str, ...] = (),
 ) -> StagedRelease:
     """Unpack the release at ``archive_path`` into the new folder ``staging`` and check that
-    its ``ota/package.index`` names exactly its files."""
+    its ``ota/package.index`` names exactly its files (but the ``unlisted`` ones it accepts)."""
     try:
         with zipfile.ZipFile(archive_path) as archive:
             staging.mkdir(parents=True)
@@ -248,8 +252,8 @@ def stage_release(
     if len(indexes) != 1:
         raise ArchiveError(f"the release does not hold exactly one {INDEX}")
     listed = index_paths((staging / indexes[0]).read_text(encoding="utf-8", errors="replace"))
-    if sorted(listed) != sorted(hashes):
-        differ = sorted(set(listed) ^ set(hashes))
+    if sorted(listed) != sorted(n for n in hashes if n not in unlisted):
+        differ = sorted(set(listed) ^ (set(hashes) - set(unlisted)))
         raise ArchiveError(
             f"{INDEX} in the release does not match its files: {', '.join(differ[:5])}"
         )

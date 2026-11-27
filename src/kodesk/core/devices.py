@@ -67,6 +67,9 @@ class DeviceModel:
     controls: tuple[Control, ...]
     verified: bool  # tested on a real device (DESIGN rule 4)
     sources: tuple[str, ...] = field(default=())
+    # USB volume labels the firmware gives it (PocketBook: the model code); names the model
+    # while KOReader is not installed yet (B-28)
+    volume_labels: tuple[str, ...] = field(default=())
 
     def controls_on(self, face: Face) -> list[Control]:
         return [c for c in self.controls if c.face is face]
@@ -92,6 +95,7 @@ def _verse_pro_color() -> DeviceModel:
         id="pocketbook-verse-pro-color",
         name="PocketBook Verse Pro Color",
         koreader_models=("PBVerseProColor",),
+        volume_labels=("PB634K3",),
         screen_px=(1072, 1448),
         dpi=300,
         color=True,
@@ -174,5 +178,13 @@ def find_by_koreader_model(model: str) -> DeviceModel | None:
     """Match the model name KOReader writes into version.log."""
     for device in DEVICES.values():
         if model in device.koreader_models:
+            return device
+    return None
+
+
+def find_by_volume_label(label: str) -> DeviceModel | None:
+    """Match the label of a reader's USB volume (e.g. ``PB634K3``), ignoring case."""
+    for device in DEVICES.values():
+        if label.upper() in (known.upper() for known in device.volume_labels):
             return device
     return None

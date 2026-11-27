@@ -159,6 +159,66 @@ class UpdateDialog(QDialog):
         )
 
 
+Prepare = Callable[[Path, Callable[[], bool], Callable[[str], None]], object]
+
+
+class ReleaseDownload(QObject):
+    """Downloads and unpacks a KOReader release on the PC in the background (update, B-06, and
+    first install, B-28), behind a cancellable progress dialog. ``finished`` gets the result or
+    the exception; the staging folder is deleted afterwards."""
+
+    def __init__(self, window: QWidget, name: str, finished: Callable[[object], None]) -> None:
+        super().__init__(window)
+        self.window = window
+        self.name = name
+        self.finished = finished
+        self.busy = False  # until ``finished`` returned (its preview and write included)
+        self.progress: QProgressDialog | None = None
+        self._cancel = threading.Event()
+        self._staging: Path | None = None
+        self._results = Results(self)
+        self._results.done.connect(self._done)
+
+    def start(self, prepare: Prepare) -> None:
+        """Run ``prepare(staging, cancelled, say)`` in the background."""
+        results = self._results
+        self.busy = True
+        self._cancel.clear()
+        self._staging = staging = Path(tempfile.mkdtemp(prefix="kodesk-koreader-"))
+        self.progress = QProgressDialog("Asking GitHub for the latest KOReader…", "Cancel", 0, 0)
+        self.progress.setParent(self.window, self.progress.windowFlags())
+        self.progress.setObjectName(self.name)
+        self.progress.setWindowTitle(APP_NAME)
+        self.progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress.setMinimumDuration(0)
+        self.progress.canceled.connect(self._cancel.set)
+        self.progress.show()
+
+        def work() -> object:
+            return prepare(
+                staging, self._cancel.is_set, lambda text: results.done.emit("progress", text)
+            )
+
+        run_in_background(results, "prepare", work)
+
+    def _done(self, job: str, result: object) -> None:
+        if job == "progress":
+            if self.progress is not None and isinstance(result, str):
+                self.progress.setLabelText(result)
+            return
+        if self.progress is not None:
+            self.progress.close()
+            self.progress.deleteLater()
+            self.progress = None
+        try:
+            self.finished(result)
+        finally:
+            self.busy = False
+            if self._staging is not None:
+                shutil.rmtree(self._staging, ignore_errors=True)
+                self._staging = None
+
+
 class KOReaderUpdater(QObject):
     """Runs the KOReader update for the main window."""
 
@@ -180,13 +240,18 @@ class KOReaderUpdater(QObject):
         self.remove = remove
         self.install: KOReaderInstall | None = None
         self.send: Callable[[Path, Progress], None] | None = None  # set over Wi-Fi
-        self.busy = False
-        self.progress: QProgressDialog | None = None
-        self._cancel = threading.Event()
-        self._staging: Path | None = None
+        self.download = ReleaseDownload(parent, "koreader-update-progress", self._prepared)
         self._checked: Callable[[str], None] | None = None
         self._results = Results(self)
         self._results.done.connect(self._done)
+
+    @property
+    def busy(self) -> bool:
+        return self.download.busy
+
+    @property
+    def progress(self) -> QProgressDialog | None:
+        return self.download.progress
 
     def why_not(self) -> str | None:
         """Why KOReader cannot be updated right now, or None."""
@@ -208,56 +273,24 @@ class KOReaderUpdater(QObject):
         if reason is not None or self.install is None or self.get is None or self.save is None:
             self._warn(reason or "No reader.")
             return
-        install, get, save, results = self.install, self.get, self.save, self._results
-        self.busy = True
-        self._cancel.clear()
-        self._staging = staging = Path(tempfile.mkdtemp(prefix="kodesk-koreader-"))
-        self.progress = QProgressDialog("Asking GitHub for the latest KOReader…", "Cancel", 0, 0)
-        self.progress.setParent(self.window, self.progress.windowFlags())
-        self.progress.setObjectName("koreader-update-progress")
-        self.progress.setWindowTitle(APP_NAME)
-        self.progress.setWindowModality(Qt.WindowModality.WindowModal)
-        self.progress.setMinimumDuration(0)
-        self.progress.canceled.connect(self._cancel.set)
-        self.progress.show()
-
-        def work() -> object:
-            return update.prepare(
-                install,
-                get,
-                save,
-                staging,
-                self._cancel.is_set,
-                lambda text: results.done.emit("progress", text),
+        install, get, save = self.install, self.get, self.save
+        self.download.start(
+            lambda staging, cancelled, say: update.prepare(
+                install, get, save, staging, cancelled, say
             )
+        )
 
-        run_in_background(self._results, "prepare", work)
+    def _prepared(self, result: object) -> None:
+        if isinstance(result, update.UpToDate):
+            self._info(f"KOReader on your reader is {result.text.lower()}.")
+        elif isinstance(result, update.UpdatePlan):
+            self.offer(result)
+        elif not isinstance(result, CancelledError):
+            self._warn(f"KOReader was not updated: {result}")
 
     def _done(self, job: str, result: object) -> None:
-        if job == "progress":
-            if self.progress is not None and isinstance(result, str):
-                self.progress.setLabelText(result)
-            return
-        if job == "check":
-            if self._checked is not None:
-                self._checked(result if isinstance(result, str) else f"Not checked: {result}")
-            return
-        self.busy = False
-        if self.progress is not None:
-            self.progress.close()
-            self.progress.deleteLater()
-            self.progress = None
-        try:
-            if isinstance(result, update.UpToDate):
-                self._info(f"KOReader on your reader is {result.text.lower()}.")
-            elif isinstance(result, update.UpdatePlan):
-                self.offer(result)
-            elif not isinstance(result, CancelledError):
-                self._warn(f"KOReader was not updated: {result}")
-        finally:
-            if self._staging is not None:
-                shutil.rmtree(self._staging, ignore_errors=True)
-                self._staging = None
+        if job == "check" and self._checked is not None:
+            self._checked(result if isinstance(result, str) else f"Not checked: {result}")
 
     def offer(self, plan: update.UpdatePlan) -> bool:
         """Conflicts first, then the preview; write if confirmed. Returns whether it was written."""

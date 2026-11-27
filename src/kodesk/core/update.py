@@ -90,6 +90,7 @@ class Layout:
     prefix: str  # the KOReader folder, volume-relative, with a trailing slash
     launcher: str | None  # a file beside it that the release also ships
     skipped: tuple[str, ...]  # in the archive, never written (KOReader's update skips them too)
+    first_install: tuple[str, ...] = ()  # of ``skipped``: written by a first install (B-28)
 
     @property
     def accepted(self) -> tuple[str, ...]:
@@ -99,7 +100,12 @@ class Layout:
 # PocketBook (v2026.07.1 zip): applications/koreader/…, applications/koreader.app (in the
 # index), system/bin/koreader.app (a stub; not in the index, KOReader's update skips it).
 LAYOUTS = {
-    "pocketbook": Layout("applications/koreader/", "applications/koreader.app", ("system/",)),
+    "pocketbook": Layout(
+        "applications/koreader/",
+        "applications/koreader.app",
+        ("system/",),
+        ("system/bin/koreader.app",),
+    ),
 }
 
 
@@ -243,6 +249,11 @@ def _check_space(volume: Path, plan: UpdatePlan) -> None:
         max(0, sizes[p] - (volume / p).stat().st_size) for p in plan.replace
     )
     largest = max((sizes[p] for p in (*plan.add, *plan.replace)), default=0)
+    check_space(volume, grow, largest)
+
+
+def check_space(volume: Path, grow: int, largest: int) -> None:
+    """Refuse unless the volume has room for ``grow`` more bytes, written file by file."""
     needed = grow + largest + SPACE_MARGIN  # each file is written beside its target first
     free = shutil.disk_usage(volume).free
     if free < needed:
@@ -252,7 +263,8 @@ def _check_space(volume: Path, plan: UpdatePlan) -> None:
         )
 
 
-def _order(paths: list[str], layout: Layout) -> list[str]:
+def write_order(paths: list[str], layout: Layout) -> list[str]:
+    """``paths`` with the files that name the version (:data:`WRITTEN_LAST`) at the end."""
     last = [layout.prefix + name for name in WRITTEN_LAST]
     return [p for p in paths if p not in last] + [p for p in last if p in paths]
 
@@ -281,7 +293,7 @@ def apply_update(
     layout = layout_of(install)
     volume = volume_root(install)
     root = volume.resolve()
-    writes = _order([p for p in (*plan.add, *plan.replace) if p not in keep], layout)
+    writes = write_order([p for p in (*plan.add, *plan.replace) if p not in keep], layout)
     removes = [p for p in plan.remove if p not in keep] + list(plan.stale)
 
     def target(path: str) -> Path:
@@ -348,7 +360,7 @@ def ota_archive(
         )
     layout = layout_of(install)
     check_launcher(install)
-    writes = _order([p for p in (*plan.add, *plan.replace) if p not in keep], layout)
+    writes = write_order([p for p in (*plan.add, *plan.replace) if p not in keep], layout)
     path = folder / PurePosixPath(OTA_UPDATE).name
     with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as archive:
         for relative in writes:

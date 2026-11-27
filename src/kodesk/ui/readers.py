@@ -9,6 +9,8 @@ read-only :func:`kodesk.core.install.find_install`). Rules, in this order:
   written yet; those are kept, and the reader is used again once it is back at the same place.
 * A reader appears and none is shown (or the shown one is gone): it is opened, unless the garage
   holds unwritten changes. Otherwise the status bar names it; Reader → Connected readers opens it.
+* A reader kodesk knows appears without KOReader (B-28): kodesk offers to install it, once per
+  plugging in; Reader → Connected readers offers it again.
 
 Started only when kodesk looks for readers itself (no PATH argument, no ``--demo``), so a
 reader given on the command line or a test tree is never swapped for a real one.
@@ -24,7 +26,9 @@ from PySide6.QtCore import QObject, QStorageInfo, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu
 
+from kodesk.core.fresh_install import BareReader, find_bare
 from kodesk.core.install import InstallError, KOReaderInstall, find_install, volume_root
+from kodesk.ui.koinstall import KOReaderInstaller
 
 if TYPE_CHECKING:
     from kodesk.ui.app import MainWindow
@@ -32,18 +36,32 @@ if TYPE_CHECKING:
 POLL_MS = 2000
 
 Lister = Callable[[], list[KOReaderInstall]]
+BareLister = Callable[[], list[BareReader]]
+
+
+def _ready_volumes() -> list[QStorageInfo]:
+    return [v for v in QStorageInfo.mountedVolumes() if v.isValid() and v.isReady()]
 
 
 def mounted_readers() -> list[KOReaderInstall]:
     """Every mounted volume that holds a KOReader installation, in mount order."""
     found = []
-    for volume in QStorageInfo.mountedVolumes():
-        if not volume.isValid() or not volume.isReady():
-            continue
+    for volume in _ready_volumes():
         try:
             found.append(find_install(Path(volume.rootPath())))
         except (InstallError, OSError):
             continue
+    return found
+
+
+def bare_readers() -> list[BareReader]:
+    """Every mounted volume of a reader kodesk knows (by its label) without KOReader."""
+    found = []
+    for volume in _ready_volumes():
+        root = Path(volume.rootPath())
+        reader = find_bare(root, volume.name() or root.name)
+        if reader is not None:
+            found.append(reader)
     return found
 
 
@@ -64,13 +82,23 @@ def connected(install: KOReaderInstall) -> bool:
 class ReaderWatcher(QObject):
     """Follows readers being plugged in and out and keeps the window and its menu in step."""
 
-    def __init__(self, window: MainWindow, menu: QMenu, lister: Lister = mounted_readers) -> None:
+    def __init__(
+        self,
+        window: MainWindow,
+        menu: QMenu,
+        lister: Lister = mounted_readers,
+        bare: BareLister = bare_readers,
+    ) -> None:
         super().__init__(window)
         self.window = window
         self.menu = menu
         self.lister = lister
+        self.bare_lister = bare
         self.readers: list[KOReaderInstall] = []
+        self.bare: list[BareReader] = []
         self.known: set[Path] = set()
+        self.known_bare: set[Path] = set()  # offered while plugged in: not offered again
+        self.installer = KOReaderInstaller(window, window.koupdate.get, window.koupdate.save)
         self.gone = False
         self.timer = QTimer(self)
         self.timer.setInterval(POLL_MS)
@@ -104,12 +132,18 @@ class ReaderWatcher(QObject):
         elif current is not None and self.gone:
             self.gone = False
             self._say(f"{reader_name(current)} is connected again.")
-        self.readers = self.lister()
+        self.readers = [r for r in self.lister() if not self._fresh(r)]
         roots = {r.root for r in self.readers}
         shown = window.install.root if window.install else None
         new = [r for r in self.readers if r.root not in self.known and r.root != shown]
         self.known = roots
+        self.bare = self.bare_lister()
+        new_bare = [r for r in self.bare if r.volume not in self.known_bare]
+        self.known_bare = {r.volume for r in self.bare}
         self._fill_menu()
+        if new_bare:
+            self.offer_install(new_bare[0])
+            return
         if not new:
             return
         reader = new[0]
@@ -126,6 +160,22 @@ class ReaderWatcher(QObject):
         if error:
             self._say(f"{reader_name(reader)}: {error}")
 
+    def _fresh(self, reader: KOReaderInstall) -> bool:
+        """Just installed by kodesk and not started yet (no model): nothing to show so far."""
+        return reader.model is None and volume_root(reader).resolve() in self.installer.fresh
+
+    def offer_install(self, reader: BareReader) -> None:
+        """Offer KOReader for a reader without it (from plugging in, or from the menu)."""
+        installer = self.installer
+        if not installer.online:
+            self._say(
+                f"{reader.name} has no KOReader yet; kodesk runs offline (--offline) and cannot "
+                "install it."
+            )
+            return
+        self._say(f"{reader.name} is connected, without KOReader.")
+        installer.offer(reader)
+
     def _fill_menu(self) -> None:
         self.menu.clear()
         shown = self.window.install.root if self.window.install else None
@@ -135,7 +185,11 @@ class ReaderWatcher(QObject):
             action.setChecked(reader.root == shown)
             action.triggered.connect(lambda _checked=False, r=reader: self.open(r))
             self.menu.addAction(action)
-        if not self.readers:
+        for bare in self.bare:
+            action = QAction(f"&Install KOReader on {bare.name}…", self.menu)
+            action.triggered.connect(lambda _checked=False, b=bare: self.offer_install(b))
+            self.menu.addAction(action)
+        if not self.readers and not self.bare:
             empty = self.menu.addAction("No reader connected")
             empty.setEnabled(False)
 
