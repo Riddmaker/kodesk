@@ -19,6 +19,11 @@
   <launchable type="desktop-id">io.github.riddmaker.kodesk.desktop</launchable>
   <url type="homepage">https://github.com/Riddmaker/kodesk</url>
   <url type="bugtracker">https://github.com/Riddmaker/kodesk/issues</url>
+  <url type="vcs-browser">https://github.com/Riddmaker/kodesk</url>
+  <branding>
+    <color type="primary" scheme_preference="light">#88c0d0</color>
+    <color type="primary" scheme_preference="dark">#0b6e75</color>
+  </branding>
   <content_rating type="oars-1.1"/>
   <supports>
     <control>pointing</control>
