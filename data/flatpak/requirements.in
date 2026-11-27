@@ -1,0 +1,3 @@
+# kodesk's runtime dependencies that the Flatpak runtime and the PySide BaseApp do not ship.
+# Edit here, then run tools/flatpak-deps.py to refresh python-deps.json (generated, do not edit).
+paramiko==5.0.0

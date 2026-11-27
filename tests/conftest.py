@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import socket
 import stat
 import urllib.request
 import zipfile
@@ -403,6 +404,21 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(f"a test tried to reach the network: {url}")
 
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", refuse)
+    real_connect = socket.create_connection
+
+    def loopback_only(address: tuple[str, int], *args: object, **kwargs: object) -> socket.socket:
+        if address[0] not in ("127.0.0.1", "::1", "localhost"):  # Wi-Fi tests: local server only
+            raise AssertionError(f"a test tried to reach the network: {address}")
+        return real_connect(address, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(socket, "create_connection", loopback_only)
+
+
+@pytest.fixture(autouse=True)
+def own_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Qt's test mode keeps app data in ~/.qttest: point HOME at the test's own folder, so no
+    test leaves snapshots or Wi-Fi keys in the real home folder (found 2026-11-27)."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 @pytest.fixture(autouse=True)

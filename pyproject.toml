@@ -19,10 +19,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Utilities",
 ]
-dependencies = ["PySide6>=6.8"]
+dependencies = ["PySide6>=6.8", "paramiko>=4"]  # paramiko: Wi-Fi via SFTP (B-11), LGPL-2.1
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-qt", "ruff", "pylint", "mypy"]
+dev = ["pytest", "pytest-qt", "ruff", "pylint", "mypy", "types-paramiko"]
 
 [project.scripts]
 kodesk = "kodesk.ui.app:main"

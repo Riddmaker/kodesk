@@ -14,16 +14,19 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
-  # The reader is a USB mass-storage volume. Read-only until snapshot/restore exists (B-04);
-  # no network until the store/update features need it (B-06).
-  - --filesystem=/run/media:ro
-  - --filesystem=/media:ro
+  # The reader is a USB mass-storage volume: kodesk writes there (snapshot first, B-04) and
+  # nowhere else outside its own data. Network: Store, updates (B-06..B-09), Wi-Fi (B-11).
+  - --filesystem=/run/media
+  - --filesystem=/media
+  - --share=network
 build-options:
   env:
     BASEAPP_REMOVE_WEBENGINE: '1'
 cleanup-commands:
   - /app/cleanup-BaseApp.sh
 modules:
+  # paramiko and its dependencies as hash-pinned wheels (tools/flatpak-deps.py, requirements.in)
+  - python-deps.json
   - name: kodesk
     buildsystem: simple
     build-commands:

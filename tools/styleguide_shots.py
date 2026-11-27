@@ -100,6 +100,7 @@ def main(argv: list[str]) -> int:
         install_preview_shot(app, window, out, suffix)
         installed_shot(app, window, out, suffix)
         koreader_update_shot(app, window, out, suffix)
+        wifi_shot(app, window, out, suffix)
         window.close()
     return 0
 
@@ -148,6 +149,14 @@ def status_bar_shot(garage: TuningGarage) -> None:
     bold = garage.findChild(QCheckBox, "footer-text_font_bold")
     assert scroll is not None and bold is not None
     scroll.ensureWidgetVisible(bold)
+
+
+def wifi_shot(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:
+    """The Wi-Fi window with the reader plugged in, not paired yet (nothing is written)."""
+    dialog = window.show_wifi()
+    app.processEvents()
+    dialog.grab().save(str(out / f"wifi{suffix}.png"))
+    dialog.close()
 
 
 def snapshot_shots(app: QApplication, window: MainWindow, out: Path, suffix: str) -> None:

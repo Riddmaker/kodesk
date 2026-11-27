@@ -39,6 +39,7 @@ from kodesk.core.settings_write import Changes, write_documents
 from kodesk.core.sleepscreen import PHOTO_DIR, PLATFORMS, place_picture
 from kodesk.core.snapshot import SnapshotStore, device_id, guarded_write
 from kodesk.core.volume import volume_serial
+from kodesk.core.wifi import KeyStore
 from kodesk.ui.changes import ChangeRunner
 from kodesk.ui.garage import ReaderContext, TuningGarage
 from kodesk.ui.installed import InstalledPage
@@ -47,6 +48,7 @@ from kodesk.ui.readers import Lister, ReaderWatcher, mounted_readers
 from kodesk.ui.screen import load_device_fonts
 from kodesk.ui.snapshots import SnapshotsDialog, with_snapshot_progress
 from kodesk.ui.store import StorePage
+from kodesk.ui.wifi import UsbReader, WifiDialog
 
 DEMO_DEVICE = "pocketbook-verse-pro-color"
 BOOK_SUFFIXES = {".epub", ".pdf", ".fb2", ".mobi", ".azw3", ".djvu", ".cbz", ".txt"}
@@ -112,9 +114,18 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
     )
 
 
+def _app_data() -> Path:
+    return Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
+
+
+def key_store() -> KeyStore:
+    """Wi-Fi pairings and kodesk's keys (B-11), in the app data folder."""
+    return KeyStore(_app_data() / "wifi")
+
+
 def snapshot_store(install: KOReaderInstall) -> SnapshotStore:
     """This reader's snapshots in the platform's app data folder (never on the reader)."""
-    data = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
+    data = _app_data()
     volume = volume_root(install)
     serial = volume_serial(
         bytes(QStorageInfo(str(volume)).device().data()).decode(errors="replace")
@@ -196,9 +207,12 @@ class MainWindow(QMainWindow):
         self.snapshots_action.triggered.connect(self.show_snapshots)
         self.koreader_action = QAction("Update &KOReader…", self)
         self.koreader_action.triggered.connect(self.koupdate.start)
+        self.wifi_action = QAction("&Wi-Fi…", self)
+        self.wifi_action.triggered.connect(self.show_wifi)
         reader_menu = self.menuBar().addMenu("&Reader")
         reader_menu.addAction(self.snapshots_action)
         reader_menu.addAction(self.koreader_action)
+        reader_menu.addAction(self.wifi_action)
         self.reader_menu = reader_menu
         self.watcher: ReaderWatcher | None = None
         self.snapshots_button = QPushButton("Snapshots…", self)
@@ -396,6 +410,20 @@ class MainWindow(QMainWindow):
             error = str(failure)
         if error:
             QMessageBox.warning(self, APP_NAME, error)
+
+    def show_wifi(self) -> WifiDialog:
+        """Pair the reader over USB and test Wi-Fi (B-11)."""
+        usb = None
+        if self.install is not None:
+            store = snapshot_store(self.install)
+            device = self.install.device
+            name = device.name if device else f"Reader {self.install.model or ''}".strip()
+            usb = UsbReader(
+                store.base.name, name, self.install.read_settings(), self.install.root, store
+            )
+        dialog = WifiDialog(key_store(), usb, self)
+        dialog.open()
+        return dialog
 
     def show_snapshots(self) -> SnapshotsDialog | None:
         """Open the Snapshots window for the connected reader."""

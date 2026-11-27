@@ -36,7 +36,10 @@
           src = pkgs.lib.cleanSource ./.;
 
           build-system = [ pkgs.python3Packages.hatchling ];
-          dependencies = [ pkgs.python3Packages.pyside6 ];
+          dependencies = [
+            pkgs.python3Packages.pyside6
+            pkgs.python3Packages.paramiko # Wi-Fi via SFTP (B-11)
+          ];
 
           nativeBuildInputs = [ pkgs.qt6.wrapQtAppsHook ];
           buildInputs = [
@@ -92,6 +95,8 @@
             (pkgs.python3.withPackages (
               ps: with ps; [
                 pyside6
+                paramiko
+                types-paramiko
                 hatchling
                 pytest
                 pytest-qt

@@ -2,4 +2,5 @@
 # Essentials only: QtCore, QtGui, QtWidgets and the image plugins; no WebEngine/Addons.
 # Edit here, then run tools/lock-requirements.sh to refresh the hashed lock file.
 PySide6-Essentials==6.12.0
+paramiko==5.0.0  # Wi-Fi via SFTP (B-11); same version as the Nix build
 pyinstaller==6.22.3
