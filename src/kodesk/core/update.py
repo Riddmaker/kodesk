@@ -15,6 +15,12 @@ with the same removal rule (so files the user added are never removed), plus:
 * ``pending-update.json`` beside the snapshots marks a running update: if it is still there on
   the next connect (cable pulled), kodesk offers the snapshot taken before.
 
+Over Wi-Fi (B-27b) KOReader is running, so kodesk cannot write its files. :func:`ota_archive`
+instead packs the same files (without the ones kept) into ``ota/koreader.updated.tar``, the
+archive KOReader's own launcher unpacks the next time KOReader starts; the launcher also does
+the removals (same rule as above). kodesk sends it only when the installed launcher is one whose
+update step it knows (:func:`check_launcher`).
+
 Owner decisions 2026-11-26: GitHub releases only (A); PocketBook only for now (B); edited files
 can be kept, default the new version (C); the launcher is updated, its old copy is in the
 snapshot (D); a third-party plugin named like a new built-in one blocks the update (E).
@@ -25,6 +31,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tarfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -58,6 +65,16 @@ INSTALLED_TAR = "ota/koreader.installed.tar"  # KOReader's own update base; rebu
 WRITTEN_LAST = ("git-rev", INDEX, "update_once.marker")
 SPACE_MARGIN = 16 * 2**20
 MAX_INDEX = 4 * 2**20
+OTA_UPDATE = "ota/koreader.updated.tar"  # unpacked by the launcher on KOReader's next start
+# The update step of the PocketBook launcher v2025.10 … v2026.07.2 (platform/pocketbook/
+# koreader.app): GNU tar -C /mnt/ext1 -xf, then the package.index rule. KOReader's master branch
+# moved to ota/update.tar.xz and its own unpack tool; not sent until checked on a reader.
+_OTA_STEPS = (
+    'NEWUPDATE="${KOREADER_DIR}/ota/koreader.updated.tar"',
+    '-C "/mnt/ext1" -xf "${NEWUPDATE}"',
+    "grep -xvFf /tmp/package.index.new /tmp/package.index.old",
+)
+MAX_LAUNCHER = 256 * 1024
 _PLUGIN = re.compile(r"plugins/(?P<name>[^/]+)" + re.escape(PLUGIN_SUFFIX) + "/")
 _SNAPSHOT_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z(?:-[0-9]+)?$")
 
@@ -294,6 +311,59 @@ def apply_update(
         raise
     clear(store.base)
     return snapshot
+
+
+def check_launcher(install: KOReaderInstall) -> None:
+    """Refuse unless the reader's launcher installs ``ota/koreader.updated.tar`` as kodesk knows."""
+    layout = layout_of(install)
+    text = ""
+    if layout.launcher is not None:
+        path = volume_root(install) / layout.launcher
+        try:
+            if path.is_file() and path.stat().st_size <= MAX_LAUNCHER:
+                text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+    if not all(step in text for step in _OTA_STEPS):
+        raise UpdateError(
+            "KOReader on this reader installs updates in a way kodesk does not know yet, so it "
+            "cannot be updated over Wi-Fi. Update it over USB."
+        )
+
+
+def ota_archive(
+    install: KOReaderInstall, plan: UpdatePlan, keep: frozenset[str], folder: Path
+) -> Path:
+    """The update as one tar for KOReader's launcher (over Wi-Fi): the files to write, paths
+    relative to the reader's volume, ``git-rev`` and ``ota/package.index`` last."""
+    if plan.conflicts:
+        raise UpdateError("remove the conflicting plugins first: " + ", ".join(plan.conflicts))
+    if not keep <= set(plan.edited):
+        raise UpdateError("only files you changed can be kept")
+    dropped = sorted(keep & set(plan.remove))
+    if dropped:
+        raise UpdateError(
+            "Over Wi-Fi KOReader itself removes the files its new version no longer has, so "
+            f"these cannot be kept: {', '.join(dropped[:5])}. Update over USB to keep them."
+        )
+    layout = layout_of(install)
+    check_launcher(install)
+    writes = _order([p for p in (*plan.add, *plan.replace) if p not in keep], layout)
+    path = folder / PurePosixPath(OTA_UPDATE).name
+    with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as archive:
+        for relative in writes:
+            source = plan.staged.folder / relative
+            if not _accepted(relative, layout) or source.is_symlink():
+                raise UpdateError(f"refusing to pack {relative}")
+            if file_sha256(source) != plan.staged.files[relative]:
+                raise UpdateError(f"{relative} changed on this PC since it was checked")
+            info = archive.gettarinfo(source, arcname=relative)
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mode = 0o755 if info.mode & 0o111 else 0o644
+            with source.open("rb") as handle:
+                archive.addfile(info, handle)
+    return path
 
 
 def prepare(  # pylint: disable=too-many-arguments,too-many-positional-arguments

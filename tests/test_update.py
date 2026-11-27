@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -396,3 +397,51 @@ def test_https_save_streams_and_cleans_up(tmp_path: Path, monkeypatch: pytest.Mo
     with pytest.raises(FileExistsError):  # an existing file is never overwritten or removed
         net.https_save(release.DOWNLOADS + "a.zip", target, 5000, lambda: False)
     assert target.exists()
+
+
+# -- over Wi-Fi: one archive for KOReader's launcher (B-27b) -------------------------------
+
+LAUNCHER_STEPS = """#!/bin/sh
+ko_update_check() {
+    NEWUPDATE="${KOREADER_DIR}/ota/koreader.updated.tar"
+    "${KOREADER_DIR}/tar" --no-same-owner -C "/mnt/ext1" -xf "${NEWUPDATE}"
+    (cd "${UNPACK_DIR}" && grep -xvFf /tmp/package.index.new /tmp/package.index.old | xargs rm)
+}
+"""
+
+
+def test_wifi_update_is_one_archive_for_the_launcher(edited: Path, tmp_path: Path) -> None:
+    (_volume(edited) / LAUNCHER).write_text(LAUNCHER_STEPS)
+    install = describe(edited, "pocketbook")
+    plan = _prepare(edited, koreader_github(tmp_path), tmp_path)
+    (tmp_path / "out").mkdir()
+
+    path = update.ota_archive(install, plan, frozenset({EDITED}), tmp_path / "out")
+
+    assert path.name == "koreader.updated.tar"
+    with tarfile.open(path) as archive:
+        members = archive.getmembers()
+        names = [m.name for m in members]
+        assert set(names) == {ADDED, CHANGED, LAUNCHER, KO + "git-rev", KO + "ota/package.index"}
+        assert names[-2:] == [KO + "git-rev", KO + "ota/package.index"]
+        assert all(m.isfile() and m.uid == 0 and m.mode in (0o644, 0o755) for m in members)
+        for name in (ADDED, CHANGED, LAUNCHER):
+            handle = archive.extractfile(name)
+            assert handle is not None and handle.read() == NEW_FILES[name]
+    assert (_volume(edited) / EDITED).read_text() == "/* mine */\n"  # nothing written here
+
+
+def test_wifi_update_needs_a_launcher_kodesk_knows(reader: Path, tmp_path: Path) -> None:
+    plan = _prepare(reader, koreader_github(tmp_path), tmp_path)
+    with pytest.raises(update.UpdateError, match="over USB"):
+        update.ota_archive(describe(reader, "pocketbook"), plan, frozenset(), tmp_path)
+
+
+def test_wifi_update_cannot_keep_a_dropped_file(reader: Path, tmp_path: Path) -> None:
+    volume = _volume(reader)
+    (volume / LAUNCHER).write_text(LAUNCHER_STEPS)
+    (volume / DROPPED).write_text("-- mine\n")
+    plan = _prepare(reader, koreader_github(tmp_path), tmp_path)
+    assert DROPPED in plan.edited
+    with pytest.raises(update.UpdateError, match="cannot be kept"):
+        update.ota_archive(describe(reader, "pocketbook"), plan, frozenset({DROPPED}), tmp_path)

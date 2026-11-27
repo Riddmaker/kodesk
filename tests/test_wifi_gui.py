@@ -114,7 +114,8 @@ def test_connect_then_install_a_plugin_over_wifi(
         qtbot.addWidget(main)
         assert main.show_wifi_reader(shown[0]) is None
         assert "over Wi-Fi (127.0.0.1)" in main.statusBar().currentMessage()
-        assert not main.koreader_action.isEnabled()  # a KOReader update needs USB
+        assert main.koreader_action.isEnabled()  # sent for the launcher over Wi-Fi (B-27b)
+        assert main.koupdate.send is not None
         assert main.garage.changes_box.writer is None  # the Garage only shows (B-26)
         assert "Alice/" not in main.garage.context.library_entries
         assert "Alice" in main.garage.context.library_entries  # the book, read over Wi-Fi

@@ -18,8 +18,14 @@ Rules for sending:
   aside (``.kodesk-old``) and the new one takes its name. Once every file has been read back and
   its SHA-256 matches, the old ones are deleted. A failure on the way puts the old files back.
 
+One exception, a new file outside the mirror: a KOReader update is sent as
+``ota/koreader.updated.tar`` (:meth:`Mirror.send_new`), which KOReader's launcher unpacks on the
+next start (B-27b). It never replaces a file, and is renamed into place only after it read back
+right.
+
 Names coming from the reader are checked before they become local paths (like zip entries:
-no ``..``, no separators); symbolic links are skipped, ``cache/`` is left out as in snapshots.
+no ``..``, no separators); symbolic links are skipped, ``cache/`` is left out as in snapshots,
+and of ``ota/`` (KOReader's update archives, tens of MB) only ``package.index`` is copied.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ from pathlib import Path, PurePosixPath
 
 import paramiko
 
+from kodesk.core.archive import INDEX as PACKAGE_INDEX
 from kodesk.core.install import READER_VOLUMES, KOReaderInstall, find_install, home_folder
 from kodesk.core.sleepscreen import SLEEP_LOGO
 from kodesk.core.snapshot import (
@@ -45,10 +52,12 @@ from kodesk.core.snapshot import (
     file_sha256,
     no_progress,
 )
+from kodesk.core.update import LAYOUTS, OTA_UPDATE
 from kodesk.core.wifi import KeyStore, Pairing, check_host, check_reader_id, connect
 
 OLD_SUFFIX = ".kodesk-old"
 WIFI_WRITABLE = ("plugins/", "patches/")  # inside the KOReader folder; see the module text
+WIFI_NEW = (OTA_UPDATE,)  # new files sent beside the mirror (Mirror.send_new)
 MAX_FILE_BYTES = 1 << 30  # larger than anything KOReader keeps; a bigger one is not fetched
 INDEX = "index.json"
 FILES = "files"
@@ -177,7 +186,7 @@ class Mirror:
                 if stat.S_ISDIR(mode):
                     if not (folder == self.relative and item.filename in EXCLUDED_DIRS):
                         todo.append(relative)
-                elif stat.S_ISREG(mode) and not item.filename.endswith((TEMP_SUFFIX, OLD_SUFFIX)):
+                elif stat.S_ISREG(mode) and self._mirrored(relative):
                     found[relative] = item
         for relative in self.extra:
             with suppress(OSError):
@@ -185,6 +194,12 @@ class Mirror:
                 if stat.S_ISREG(item.st_mode or 0):
                     found[relative] = item
         return found
+
+    def _mirrored(self, relative: str) -> bool:
+        if relative.endswith((TEMP_SUFFIX, OLD_SUFFIX)):
+            return False
+        inside = relative.removeprefix(self.relative + "/")
+        return not inside.startswith("ota/") or inside == PACKAGE_INDEX
 
     def _fresh(self, relative: str, item: Attributes) -> bool:
         known = self.known.get(relative)
@@ -401,6 +416,46 @@ class Mirror:
                 return
             folder = folder.parent
 
+    def send_new(
+        self, sftp: Sftp, inside: str, source: Path, progress: Progress = no_progress
+    ) -> None:
+        """Upload ``source`` as a new file ``inside`` the KOReader folder (only :data:`WIFI_NEW`).
+
+        Refused if the reader already has that file; uploaded beside it, read back, then renamed.
+        ``progress`` gets bytes sent and in total; raising from it stops the upload cleanly.
+        """
+        if inside not in WIFI_NEW:
+            raise MirrorError(f"kodesk does not send {inside} over Wi-Fi")
+        relative = f"{self.relative}/{inside}"
+        target = self.remote(relative)
+        with suppress(FileNotFoundError):
+            sftp.stat(target)
+            raise MirrorError(
+                "A KOReader update is already waiting on the reader. Restart KOReader to "
+                "install it (Exit → Restart KOReader), then connect again."
+            )
+        total = source.stat().st_size
+        made: list[str] = []
+        try:
+            self._makedirs(sftp, PurePosixPath(relative).parent.as_posix(), made)
+            progress(0, total)
+            with source.open("rb") as handle:
+                sftp.putfo(
+                    handle, target + TEMP_SUFFIX, total, lambda done, _all: progress(done, total)
+                )
+            if self._remote_sha(sftp, relative + TEMP_SUFFIX) != file_sha256(source):
+                raise MirrorError(f"{inside} reads back differently from the reader")
+            sftp.rename(target + TEMP_SUFFIX, target)
+        except Exception as error:
+            with suppress(OSError):
+                sftp.remove(target + TEMP_SUFFIX)
+            for folder in reversed(made):
+                with suppress(OSError):
+                    sftp.rmdir(folder)
+            if isinstance(error, (MirrorError, OSError, paramiko.SSHException)):
+                raise MirrorError(f"the update was not sent: {error}") from error
+            raise
+
     def _remote_sha(self, sftp: Sftp, relative: str) -> str:
         sha = hashlib.sha256()
         with sftp.open(self.remote(relative), "rb") as source:
@@ -440,7 +495,8 @@ class WifiReader:
                 "is on it."
             )
         folder = base / check_reader_id(pairing.reader_id)
-        mirror = Mirror(folder, pairing.koreader_path, (SLEEP_LOGO,))
+        launchers = tuple(layout.launcher for layout in LAYOUTS.values() if layout.launcher)
+        mirror = Mirror(folder, pairing.koreader_path, (SLEEP_LOGO, *launchers))
         return cls(keys, pairing, check_host(host), mirror)
 
     def install(self) -> KOReaderInstall:
@@ -455,6 +511,12 @@ class WifiReader:
             home = home_folder(install.platform, install.read_settings())
             self.books = tuple(remote_entries(connection.sftp, self.mirror.remote(home)))
         return install
+
+    def send_update(self, archive: Path, progress: Progress = no_progress) -> None:
+        """Send a KOReader update (:func:`kodesk.core.update.ota_archive`) to the reader."""
+        with connect(self.keys, self.pairing, self.host) as connection:
+            self.pairing = connection.pairing
+            self.mirror.send_new(connection.sftp, OTA_UPDATE, archive, progress)
 
     def publish(self) -> None:
         """Send the mirror's changes to the reader (the snapshot store's ``publish``)."""

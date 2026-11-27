@@ -3,6 +3,8 @@
 The download and unpacking run in the background behind a cancellable progress dialog; the
 preview lists what changes and lets the user keep their own version of KOReader files they
 edited; the write runs with the wait cursor, inside a snapshot (:mod:`kodesk.core.update`).
+Over Wi-Fi (``send`` set, B-27b) the snapshot is taken of the mirror and the update is sent as
+one archive that KOReader's launcher installs when KOReader restarts.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ import shutil
 import tempfile
 import threading
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import QObject, Qt
 from PySide6.QtWidgets import (
@@ -33,12 +35,15 @@ from kodesk.core import update
 from kodesk.core.archive import ArchiveError
 from kodesk.core.catalogue import Kind
 from kodesk.core.install import KOReaderInstall
+from kodesk.core.mirror import MirrorError
 from kodesk.core.net import CancelledError, Get, NetError, Save
-from kodesk.core.snapshot import SnapshotError, SnapshotStore
-from kodesk.ui.snapshots import path_lines, with_snapshot_progress
+from kodesk.core.snapshot import Progress, SnapshotError, SnapshotStore
+from kodesk.ui.snapshots import busy, path_lines, with_snapshot_progress
 from kodesk.ui.store import Results, run_in_background
 
-FAILURES = (update.UpdateError, NetError, ArchiveError, SnapshotError, OSError)
+FAILURES = (update.UpdateError, NetError, ArchiveError, SnapshotError, OSError, MirrorError)
+SENDING = "Sending the update to your reader…"
+CHECKING = "Checking it on your reader…"
 SOURCE = "github.com/koreader/koreader"
 
 
@@ -174,6 +179,7 @@ class KOReaderUpdater(QObject):
         self.changed = changed
         self.remove = remove
         self.install: KOReaderInstall | None = None
+        self.send: Callable[[Path, Progress], None] | None = None  # set over Wi-Fi
         self.busy = False
         self.progress: QProgressDialog | None = None
         self._cancel = threading.Event()
@@ -298,6 +304,8 @@ class KOReaderUpdater(QObject):
         """Snapshot, write, verify (restored on any problem)."""
         if self.install is None:
             return False
+        if self.send is not None:
+            return self._send(plan, keep, self.send)
         store, install = self.store_for(self.install), self.install
         try:
             with_snapshot_progress(
@@ -313,6 +321,36 @@ class KOReaderUpdater(QObject):
             f"KOReader is now {plan.release.tag}. The snapshot taken before is kept (Reader → "
             "Snapshots…). Eject the reader and start KOReader once; on the next connect, "
             "kodesk checks that it loaded everything."
+        )
+        return True
+
+    def _send(
+        self, plan: update.UpdatePlan, keep: frozenset[str], send: Callable[[Path, Progress], None]
+    ) -> bool:
+        """Over Wi-Fi: snapshot (the mirror), pack the update, send it for KOReader's launcher."""
+        if self.install is None:
+            return False
+        store, install = self.store_for(self.install), self.install
+        launcher = update.layout_of(install).launcher
+        outside = (PurePosixPath(launcher).name,) if launcher else ()
+        staging = Path(tempfile.mkdtemp(prefix="kodesk-ota-"))
+        try:
+            archive = busy(lambda: update.ota_archive(install, plan, keep, staging))
+            with_snapshot_progress(
+                self.window, lambda progress: store.take(install.root, outside, progress), None
+            )
+            with_snapshot_progress(
+                self.window, lambda progress: send(archive, progress), CHECKING, SENDING, "sent"
+            )
+        except FAILURES as error:
+            self._warn(f"KOReader was not updated, your reader is as before: {error}")
+            return False
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        self._info(
+            f"KOReader {plan.release.tag} is on your reader and installs itself when KOReader "
+            "starts again: in KOReader, Exit → Restart KOReader. The snapshot taken before is "
+            "kept (Reader → Snapshots…); should KOReader not start any more, restore it over USB."
         )
         return True
 

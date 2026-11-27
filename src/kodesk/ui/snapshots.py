@@ -79,6 +79,7 @@ def with_snapshot_progress[T](
     action: Callable[[Progress], T],
     then: str | None = WRITING,
     label: str = TAKING,
+    verb: str = "read",
 ) -> T:
     """Run ``action`` (a guarded write, or a snapshot alone) behind a modal progress dialog.
 
@@ -98,7 +99,7 @@ def with_snapshot_progress[T](
     def report(done: int, total: int) -> None:
         if dialog.wasCanceled():
             raise SnapshotCancelledError
-        dialog.setLabelText(f"{label}\n{human_size(done)} of {human_size(total)} read")
+        dialog.setLabelText(f"{label}\n{human_size(done)} of {human_size(total)} {verb}")
         dialog.setValue(STEPS if done >= total else done * STEPS // max(total, 1))
         if dialog.wasCanceled():
             raise SnapshotCancelledError

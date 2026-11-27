@@ -248,7 +248,7 @@ class MainWindow(QMainWindow):
         self.install = install
         wifi = self._over_wifi(install)
         self.snapshots_action.setEnabled(install is not None)
-        self.koreader_action.setEnabled(install is not None and not wifi)
+        self.koreader_action.setEnabled(install is not None)
         self.snapshots_button.setVisible(install is not None)
         old: QWidget | None = getattr(self, "garage", None)
         self.garage = TuningGarage(context, self)
@@ -259,7 +259,8 @@ class MainWindow(QMainWindow):
         self.garage.storeRequested.connect(self.show_in_store)
         self.tabs.setCurrentIndex(0)
         self.changes.install = install
-        self.koupdate.install = None if wifi else install  # an update needs USB (B-27)
+        self.koupdate.install = install
+        self.koupdate.send = self.wifi.send_update if wifi and self.wifi else None  # B-27b
         self.reread()
         self.statusBar().showMessage(context.source_label)
         if install is not None and not wifi:  # over Wi-Fi the Garage shows only (B-26)

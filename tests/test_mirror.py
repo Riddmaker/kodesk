@@ -258,6 +258,48 @@ def test_guarded_write_on_the_mirror_publishes_and_undoes_a_refusal(
     assert not (koreader / "plugins/wifitest.koplugin").exists()
 
 
+def test_sync_leaves_koreaders_update_archives_out(
+    session: tuple[KeyStore, Pairing, FakeReader], volume: Path, tmp_path: Path
+) -> None:
+    ota = volume / "applications/koreader/ota"
+    ota.mkdir(exist_ok=True)
+    (ota / "koreader.installed.tar").write_bytes(b"t" * 100)
+    (ota / "package.index").write_text("applications/koreader/reader.lua\n")
+    mirror = Mirror(tmp_path / "mirror", KOREADER)
+    with _sftp(session) as sftp:
+        mirror.sync(sftp)
+    assert (mirror.koreader_dir / "ota/package.index").is_file()
+    assert not (mirror.koreader_dir / "ota/koreader.installed.tar").exists()
+
+
+def test_a_koreader_update_is_sent_once_and_read_back(
+    session: tuple[KeyStore, Pairing, FakeReader], volume: Path, tmp_path: Path
+) -> None:
+    archive = tmp_path / "koreader.updated.tar"
+    archive.write_bytes(b"u" * 70000)
+    target = volume / "applications/koreader/ota/koreader.updated.tar"
+    mirror = Mirror(tmp_path / "mirror", KOREADER)
+    reports: list[tuple[int, int]] = []
+    with _sftp(session) as sftp:
+        with pytest.raises(MirrorError):
+            mirror.send_new(sftp, "settings.reader.lua", archive)
+
+        def stop(done: int, _total: int) -> None:
+            if done:
+                raise RuntimeError("cancelled")
+
+        with pytest.raises(RuntimeError):
+            mirror.send_new(sftp, "ota/koreader.updated.tar", archive, stop)
+        assert not target.exists() and not target.with_name(target.name + TEMP_SUFFIX).exists()
+
+        mirror.send_new(sftp, "ota/koreader.updated.tar", archive, lambda *r: reports.append(r))
+        assert target.read_bytes() == archive.read_bytes()
+        assert reports[0] == (0, 70000) and reports[-1] == (70000, 70000)
+        with pytest.raises(MirrorError, match="already waiting"):
+            mirror.send_new(sftp, "ota/koreader.updated.tar", archive)
+    assert not list(target.parent.glob("*" + TEMP_SUFFIX))
+
+
 def test_an_old_pairing_must_be_paired_again(tmp_path: Path) -> None:
     keys = KeyStore(tmp_path / "wifi")
     with pytest.raises(MirrorError, match="Pair this reader again"):

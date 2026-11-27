@@ -15,7 +15,7 @@ from kodesk.core.snapshot import SnapshotStore
 from kodesk.ui.app import MainWindow, reader_context
 from kodesk.ui.koupdate import KOReaderUpdater, UpdateDialog, preview_text
 from tests.conftest import RELEASE, FakeGitHub, make_reader
-from tests.test_update import EDITED, NEW, koreader_github
+from tests.test_update import EDITED, LAUNCHER, LAUNCHER_STEPS, NEW, koreader_github
 
 
 class Dialogs:
@@ -184,3 +184,20 @@ def test_update_koreader_has_keys(
     assert main.koreader_action.text() == "Update &KOReader…" and main.koreader_action.isEnabled()
     with qtbot.waitSignal(main.installed.koreader_update_requested):
         qtbot.keyClick(main.installed.tree, Qt.Key.Key_K, Qt.KeyboardModifier.AltModifier)
+
+
+def test_over_wifi_the_update_is_sent_for_the_launcher(
+    window: tuple[MainWindow, Path, FakeGitHub, SnapshotStore],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main, koreader, _github, store = window
+    (koreader.parents[1] / LAUNCHER).write_text(LAUNCHER_STEPS)
+    sent: list[tuple[str, bytes]] = []
+    main.koupdate.send = lambda path, progress: sent.append((path.name, path.read_bytes()))
+    dialogs = Dialogs(monkeypatch, keep=frozenset())
+    _run(main, qtbot)
+    assert [name for name, _data in sent] == ["koreader.updated.tar"]
+    assert (koreader / "git-rev").read_text() != f"{NEW}\n"  # the launcher installs it
+    assert len(store.snapshots()) == 1
+    assert "Restart KOReader" in dialogs.messages[-1]
