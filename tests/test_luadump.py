@@ -8,8 +8,10 @@ import subprocess
 import pytest
 
 from kodesk.core.luadump import (
+    KeyPath,
     LuaParseError,
     LuaTable,
+    LuaValue,
     SettingsDocument,
     changed_paths,
     dump,
@@ -195,3 +197,23 @@ def test_dump_scalar_and_type_errors() -> None:
     assert dump(True) == "true"
     with pytest.raises(TypeError):
         dump(None)  # type: ignore[arg-type]
+
+
+NESTED = """return {
+    ["a"] = {
+        ["b"] = {
+            ["x"] = true,
+        },
+    },
+    ["c"] = {
+        ["y"] = 1,
+    },
+}
+"""
+
+
+@pytest.mark.parametrize(("path", "value"), [(("a", "b"), {"x": True}), (("c",), {"y": 1})])
+def test_replacing_a_table_with_itself_changes_no_byte(path: KeyPath, value: LuaValue) -> None:
+    """Regression (B-22): a table value was dumped one level too shallow when replacing."""
+    document = SettingsDocument.parse(NESTED)
+    assert document.set(path, value).text == NESTED

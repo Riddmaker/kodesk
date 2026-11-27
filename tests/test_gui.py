@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QLabel,
     QListWidget,
     QMessageBox,
     QProgressDialog,
@@ -26,6 +27,7 @@ from pytestqt.qtbot import QtBot
 
 from kodesk.core import healthcheck
 from kodesk.core.devices import Face
+from kodesk.core.hotcorners import GESTURES_FILE
 from kodesk.core.install import find_install
 from kodesk.core.librarymode import COVER_BROWSER, read_config
 from kodesk.core.snapshot import (
@@ -155,7 +157,7 @@ def test_menu_view_draws_the_readers_icons_and_locks_icon_packs(
     garage.context.icons.clear()
     assert garage.screen_image() != with_icon  # the real icon, not the plain sign
     garage.set_view(View.BOOK)
-    assert not garage.device_view.spots
+    assert "icons" not in garage.device_view.spots  # the Book view has the corners
 
 
 def test_icon_extension_unlocks_the_icons(qtbot: QtBot, tmp_path: Path) -> None:
@@ -663,3 +665,63 @@ def test_library_look_refused_while_koreader_has_the_cache_open(
     assert "Close KOReader" in warnings[0]
     assert read_config(cache)["filemanager_display_mode"] == "list_image_meta"
     assert install_snapshots(window) == 0
+
+
+def test_corners_show_the_readers_gestures_and_keep_unknown_ones(garage: TuningGarage) -> None:
+    corners = garage.corners
+    assert corners.combos["tap_top_left_corner"].currentText() == "Toggle page flipping"
+    assert corners.combos["tap_right_bottom_corner"].currentText() == "Pass through"
+    kept = corners.combos["hold_bottom_right_corner"]
+    assert kept.currentText() == "screenshot + toggle_wifi"
+    assert "keeps it exactly" in kept.itemData(0, Qt.ItemDataRole.ToolTipRole)
+    assert set(garage.device_view.spots) == {
+        "corner-top-left",
+        "corner-top-right",
+        "corner-bottom-left",
+        "corner-bottom-right",
+    }
+    garage.select_spot("corner-top-right")
+    assert corners.combos["tap_top_right_corner"].hasFocus()
+    assert garage.status.text() == (
+        "Top right corner: tap → Toggle bookmark · long press → Pass through"
+    )
+    assert not corners.changed()
+
+
+def test_corner_change_is_written_with_one_entry_changed(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, koreader = _real_reader(tmp_path, monkeypatch)
+    qtbot.addWidget(window)
+    garage = window.garage
+    gestures = koreader / GESTURES_FILE
+    old = gestures.read_text()
+    combo = garage.corners.combos["hold_bottom_right_corner"]
+    combo.setCurrentIndex(combo.findData("toc"))
+    combo.setCurrentIndex(0)  # back to the reader's own two actions: nothing pending
+    assert not garage.changes_box.write_button.isEnabled()
+    tap = garage.corners.combos["tap_right_bottom_corner"]
+    tap.setCurrentIndex(tap.findData("night_mode"))  # keyboard: Tab to it, arrow keys
+    assert garage.changes_box.lines() == [
+        "gestures.lua: Bottom right corner, tap: Pass through → Toggle night mode"
+    ]
+    monkeypatch.setattr(TuningGarage, "confirm_write", lambda _self, count: count == 1)
+    garage.changes_box.write_button.click()
+    new = gestures.read_text()
+    added = [line for line in new.splitlines() if line not in old.splitlines()]
+    assert added == [
+        '        ["tap_right_bottom_corner"] = {',
+        '            ["night_mode"] = true,',
+    ]
+    assert garage.status.text().startswith("Written to your reader.")
+    assert not garage.corners.changed()
+    assert install_snapshots(window) == 1
+
+
+def test_corners_without_a_gestures_file_are_read_only(qtbot: QtBot) -> None:
+    window = MainWindow(demo_context(), offline=True)
+    qtbot.addWidget(window)
+    corners = window.garage.corners
+    assert corners.combos["tap_top_right_corner"].currentText() == "Toggle bookmark"  # default
+    assert not corners.combos["tap_top_right_corner"].isEnabled()
+    assert corners.findChild(QLabel, "corners-no-file") is not None

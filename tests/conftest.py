@@ -52,6 +52,8 @@ def make_pocketbook(root: Path, settings: dict[object, object] | None = None) ->
     (koreader / "settings.reader.lua").write_text(
         dump_file(data, "./settings.reader.lua")  # type: ignore[arg-type]
     )
+    (koreader / "settings").mkdir()
+    (koreader / "settings/gestures.lua").write_text(gestures_lua())
     books = root / "Books"
     books.mkdir()
     (books / "Alice.epub").write_bytes(b"PK")
@@ -141,6 +143,33 @@ def _shipped_content(name: str, version: str = RELEASE) -> bytes:
     return f"-- {name}\n".encode()
 
 
+# settings/gestures.lua as KOReader leaves it after its first start (defaults copied, B-22), plus
+# one corner the user gave two actions to and a multiswipe: kodesk must keep both as they are.
+OWNER_LIKE_GESTURES = {
+    "custom_multiswipes": {},
+    "gesture_fm": {"tap_left_bottom_corner": {"toggle_frontlight": True}},
+    "gesture_reader": {
+        "hold_bottom_right_corner": {
+            "screenshot": True,
+            "settings": {"order": {1: "screenshot", 2: "toggle_wifi"}},
+            "toggle_wifi": True,
+        },
+        "multiswipe_north_south": {"folder_up": True},
+        "tap_left_bottom_corner": {"toggle_frontlight": True},
+        "tap_top_left_corner": {"toggle_page_flipping": True},
+        "tap_top_right_corner": {"toggle_bookmark": True},
+    },
+}
+
+
+def gestures_lua() -> str:
+    """OWNER_LIKE_GESTURES as KOReader's serializer writes the file."""
+    return dump_file(
+        OWNER_LIKE_GESTURES,  # type: ignore[arg-type]
+        "/mnt/ext1/applications/koreader/settings/gestures.lua",
+    )
+
+
 def make_reader(root: Path, platform: str, settings: dict[object, object] | None = None) -> Path:
     """A reader volume: the real release's files plus typical user state (B-05).
 
@@ -155,6 +184,7 @@ def make_reader(root: Path, platform: str, settings: dict[object, object] | None
     data = OWNER_LIKE_SETTINGS if settings is None else settings
     user_files = {
         "settings.reader.lua": dump_file(data, "./settings.reader.lua"),  # type: ignore[arg-type]
+        "settings/gestures.lua": gestures_lua(),
         "history.lua": 'return {\n    [1] = {\n        ["file"] = "/mnt/ext1/Books/Alice.epub",\n'
         '        ["time"] = 1764000000,\n    },\n}\n',
         "settings/vocabulary_builder.sqlite3": "fake db",

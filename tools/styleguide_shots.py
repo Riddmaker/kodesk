@@ -91,6 +91,7 @@ def main(argv: list[str]) -> int:
         status_bar_shot(garage)
         shot("garage-status-bars")
         library_shots(garage, shot)
+        corners_shot(garage, shot)
         garage.set_view(View.SLEEP)
         shot("garage-sleep")
         snapshot_shots(app, window, out, suffix)
@@ -111,6 +112,13 @@ def library_shots(garage: TuningGarage, shot: Callable[[str], None]) -> None:
     mode.setCurrentIndex(mode.findData("mosaic_image"))
     mode.setFocus()
     shot("garage-library-mosaic")
+
+
+def corners_shot(garage: TuningGarage, shot: Callable[[str], None]) -> None:
+    """The Book view with the bottom-right corner chosen: its field focused in the panel."""
+    garage.set_view(View.BOOK)
+    garage.select_spot("corner-bottom-right")
+    shot("garage-corners")
 
 
 def grab_modal(app: QApplication, path: Path, tries: int = 50) -> None:

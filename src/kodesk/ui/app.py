@@ -24,11 +24,18 @@ from PySide6.QtWidgets import (
 from kodesk import APP_ID, APP_NAME, __version__
 from kodesk.core import catalogue, healthcheck, icons, net
 from kodesk.core.devices import DEVICES
+from kodesk.core.hotcorners import GESTURES_FILE
 from kodesk.core.icons import icon_file
-from kodesk.core.install import InstallError, KOReaderInstall, find_install, volume_root
+from kodesk.core.install import (
+    InstallError,
+    KOReaderInstall,
+    find_install,
+    read_settings_file,
+    volume_root,
+)
 from kodesk.core.librarymode import LibraryLook, read_look, write_mode
 from kodesk.core.luadump import SettingsDocument
-from kodesk.core.settings_write import write_settings
+from kodesk.core.settings_write import Changes, write_documents
 from kodesk.core.sleepscreen import PHOTO_DIR, PLATFORMS, place_picture
 from kodesk.core.snapshot import SnapshotStore, device_id, guarded_write
 from kodesk.core.volume import volume_serial
@@ -71,6 +78,12 @@ def menu_icons(koreader_root: Path) -> dict[str, Path]:
     return {name: path for name, path in found.items() if path is not None}
 
 
+def _gestures(koreader_root: Path) -> SettingsDocument | None:
+    """settings/gestures.lua (read-only); None until KOReader has saved it once."""
+    path = koreader_root / GESTURES_FILE
+    return read_settings_file(path) if path.is_file() else None
+
+
 def reader_context(install: KOReaderInstall) -> ReaderContext:
     """Read everything the garage shows from a connected reader."""
     if install.device is None:
@@ -93,6 +106,7 @@ def reader_context(install: KOReaderInstall) -> ReaderContext:
         sleep_image=sleep if sleep.is_file() else None,
         plugins=install.plugins(),
         icons=menu_icons(install.root),
+        gestures=_gestures(install.root),
         library=read_look(install.root, settings, install.plugins()),
         source_label=f"KOReader {install.version or '?'} on {volume}",
     )
@@ -213,9 +227,7 @@ class MainWindow(QMainWindow):
         self.reread()
         self.statusBar().showMessage(context.source_label)
         if install is not None:
-            self.garage.set_writer(
-                lambda before, after: self._write_settings(install, before, after)
-            )
+            self.garage.set_writer(lambda changes: self._write_settings(install, changes))
             if install.platform in PLATFORMS:
                 self.garage.set_sleep_writer(lambda data: self._write_sleep(install, data))
             self.garage.set_library_writer(lambda rows: self._write_library(install, rows))
@@ -284,12 +296,10 @@ class MainWindow(QMainWindow):
             self.store.ensure_loaded()  # no network before the user opens the Store
             self.store.search.setFocus()
 
-    def _write_settings(
-        self, install: KOReaderInstall, before: SettingsDocument, after: SettingsDocument
-    ) -> str:
+    def _write_settings(self, install: KOReaderInstall, changes: Changes) -> str:
         store = snapshot_store(install)
         snapshot = with_snapshot_progress(
-            self, lambda progress: write_settings(store, install.root, before, after, progress)
+            self, lambda progress: write_documents(store, install.root, changes, progress)
         )
         taken = snapshot.created.astimezone().strftime("%H:%M")
         return f"Written to your reader. Snapshot from {taken} kept (Reader → Snapshots…)."

@@ -478,7 +478,7 @@ class SettingsDocument:
         if entry is not None and len(remaining) == 1:
             new_text = (
                 self.text[: entry.value_start]
-                + dump(value, node.depth)
+                + dump(value, node.depth + 1)  # the entry sits one level inside node
                 + self.text[entry.value_end :]
             )
             return SettingsDocument.parse(new_text)

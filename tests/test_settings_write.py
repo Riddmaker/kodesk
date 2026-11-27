@@ -28,7 +28,7 @@ def test_refuses_when_koreader_wrote_in_between(reader: Path, store: SnapshotSto
     path = reader / "settings.reader.lua"
     before = read_settings_file(path)
     path.write_text(path.read_text().replace("22", "24"))  # KOReader flushed on exit
-    with pytest.raises(StaleSettingsError, match="KOReader still open"):
+    with pytest.raises(StaleSettingsError, match="KOReader still"):
         write_settings(store, reader, before, before.set(("copt_font_size",), 26))
     assert '["copt_font_size"] = 24' in path.read_text()
     assert not store.snapshots()

@@ -13,7 +13,7 @@ from enum import StrEnum
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRect, Qt, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from kodesk.core.devices import Control, DeviceModel, Face
 from kodesk.core.extensions import Area, Extension, installed_for
+from kodesk.core.hotcorners import CORNER_ZONE, CORNERS, GESTURES_FILE, HOLD_IGNORED_KEY
 from kodesk.core.layout import (
     DEFAULT_B_MARGIN,
     DEFAULT_H_MARGINS,
@@ -48,6 +49,7 @@ from kodesk.core.layout import (
 from kodesk.core.librarymode import COVER_BROWSER, LibraryLook
 from kodesk.core.librarymode import label as mode_label
 from kodesk.core.luadump import KeyPath, LuaValue, SettingsDocument, changed_paths
+from kodesk.core.settings_write import SETTINGS_FILE, Changes
 from kodesk.core.statusbar import (
     ALIGNMENTS,
     BAR_POSITIONS,
@@ -66,6 +68,7 @@ from kodesk.core.statusbar import (
     footer_with,
     header_key,
 )
+from kodesk.ui.corners_panel import CornersPanel
 from kodesk.ui.device_view import DeviceView, Spot
 from kodesk.ui.extensions import ExtensionLock
 from kodesk.ui.library_panel import LibraryPanel, LibraryWriter
@@ -113,6 +116,7 @@ class ReaderContext:
     source_label: str = "demo (no reader connected)"
     plugins: tuple[str, ...] = ()  # installed plugin names, e.g. "pbfixes"
     icons: dict[str, Path] = field(default_factory=dict)  # icon name → file on the reader
+    gestures: SettingsDocument | None = None  # settings/gestures.lua (None: not saved yet)
     library: LibraryLook = field(default_factory=lambda: LibraryLook(COVER_BROWSER, None))
 
 
@@ -260,8 +264,9 @@ class KeyPanel(QGroupBox):
             self.unlock.blockSignals(False)
 
 
-# Writes the edited settings to the reader; returns a short report for the status line.
-SettingsWriter = Callable[[SettingsDocument, SettingsDocument], str]
+# Writes the edited settings files (name → before, after) to the reader; returns a short report
+# for the status line.
+SettingsWriter = Callable[[Changes], str]
 
 
 class ChangesBox(QGroupBox):
@@ -304,6 +309,10 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         width, height = context.device.screen_px
         self.sleep_panel = SleepDropPanel(width, height, self)
         self.library_panel = LibraryPanel(context.library, self)
+        self.corners = CornersPanel(
+            context.gestures, context.settings.get((HOLD_IGNORED_KEY,)) is True, self
+        )
+        self.corners.cornersChanged.connect(self._corners_changed)
         self.library_panel.modeChanged.connect(self._library_mode_changed)
         self._renderer: BookRenderer | None = None
 
@@ -367,8 +376,10 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         book_layout_.addWidget(self._book_panel())
         book_layout_.addWidget(self._header_panel())
         book_layout_.addWidget(self._footer_panel())
+        book_layout_.addWidget(self.corners)
         book_layout_.addStretch(1)
         scroll = QScrollArea(self)
+        self.book_scroll = scroll
         scroll.setObjectName("book-settings")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -437,6 +448,10 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         if unlock is not None:
             self._set_or_default(unlock.path, on, unlock.default)
 
+    def _corners_changed(self) -> None:
+        self.refresh()
+        self.settingsChanged.emit()
+
     def changed(self) -> list[KeyPath]:
         """Key paths whose value differs from the reader's own settings."""
         return changed_paths(self.original.data, self.edited.data)
@@ -468,18 +483,29 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         box.exec()
         return box.clickedButton() is action
 
+    def pending(self) -> Changes:
+        """The settings files to write: name → (as read, as edited)."""
+        changes: dict[str, tuple[SettingsDocument, SettingsDocument]] = {}
+        if self.changed():
+            changes[SETTINGS_FILE] = (self.original, self.edited)
+        corners = self.corners
+        if corners.changed() and corners.original is not None and corners.edited is not None:
+            changes[GESTURES_FILE] = (corners.original, corners.edited)
+        return changes
+
     def write_changes(self) -> None:
         """Write the pending changes through the writer; on success they become the baseline."""
-        count = len(self.changed())
+        count = len(self.changed()) + len(self.corners.changed())
         writer = self.changes_box.writer
         if writer is None or not count or not self.confirm_write(count):
             return
         try:
-            report = writer(self.original, self.edited)
+            report = writer(self.pending())
         except Exception as error:  # pylint: disable=broad-exception-caught  # shown, not raised
             QMessageBox.warning(self, "Write to your reader", str(error))
             return
         self.original = self.edited
+        self.corners.written()
         self.refresh()
         self.status.setText(report)
 
@@ -735,6 +761,12 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
     def select_spot(self, spot_id: str) -> None:
         """A part of the drawn screen was clicked or chosen by keyboard."""
         self.device_view.select_spot(spot_id)
+        corner = next((c for c in CORNERS if f"corner-{c.id}" == spot_id), None)
+        if corner is not None:
+            combo = self.corners.combos[corner.tap]
+            self.book_scroll.ensureWidgetVisible(combo)
+            combo.setFocus()
+            self.status.setText(self.corners.summary(corner))
         if spot_id == "icons":
             locked = self._icons_extension() is None
             self.status.setText(
@@ -746,6 +778,17 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
 
     def _spots(self) -> list[Spot]:
         """The clickable parts of the drawn screen in the current view."""
+        width, height = self.context.device.screen_px
+        if self.view is View.BOOK:
+            w, h = round(width * CORNER_ZONE), round(height * CORNER_ZONE)
+            return [
+                Spot(
+                    f"corner-{c.id}",
+                    f"{c.label} corner",
+                    QRect(width - w if c.right else 0, height - h if c.bottom else 0, w, h),
+                )
+                for c in CORNERS
+            ]
         if self.view is View.MENU:
             return [
                 Spot(
@@ -911,11 +954,13 @@ class TuningGarage(QWidget):  # pylint: disable=too-many-instance-attributes  # 
         self.device_view.set_spots(self._spots())
         box = self.changes_box
         box.list.clear()
-        box.write_button.setEnabled(box.writer is not None and bool(self.changed()))
+        pending = bool(self.changed() or self.corners.changed())
+        box.write_button.setEnabled(box.writer is not None and pending)
         for path in self.changed():
             old, new = self.original.get(path), self.edited.get(path)
             name = ".".join(str(part) for part in path)
             box.list.addItem(f"{name}: {_short(old)} → {_short(new)}")
+        box.list.addItems(self.corners.lines())
         if self.view is View.BOOK:
             book = self._book()
             self.status.setText(
